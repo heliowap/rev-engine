@@ -1,10 +1,13 @@
 #!/bin/bash
-jobs_root=/var/lib/rev-engine/jobs
-node=/opt/rev-engine-node/bin/node
 # Runs one review as the reviewer user. provision.sh installs it root-owned as
 # /usr/local/libexec/rev-engine/review, and sudo reaches it through one rule. It reads the model key
-# from stdin and the settings from the job's env file, and takes nothing else from its caller: the
-# environment is replaced with an allowlist before the review starts.
+# from stdin and the settings from the job's env file, and takes nothing else from its caller. Before
+# the review starts, the environment is cleared and rebuilt from an allowlist. The key is passed only
+# in that environment, never in an argument list.
+set -euo pipefail
+
+jobs_root=/var/lib/rev-engine/jobs
+node=/opt/rev-engine-node/bin/node
 
 die() {
   echo "rev-engine: $1" >&2
@@ -55,7 +58,16 @@ done < "$job/env"
 
 umask 022
 echo "rev-engine: review runs as $(id -un)" >&2
-exec env -i PATH=/usr/bin:/bin HOME=/nonexistent LANG=C.UTF-8 OPENROUTER_API_KEY="$key" \
-  ${envargs[@]+"${envargs[@]}"} \
-  RB_REPO="$job/repo" RB_DIFF="$job/pr/diff.patch" RB_PR_JSON="$job/pr/pr.json" RB_PRIOR_JSON="$job/pr/prior.json" \
-  RB_OUT="$job/out/findings.json" RB_DETAILS_OUT="$job/out/details.json" "$node" "$job/code/src/main.ts"
+
+# Every variable the caller exported is removed, so none of them reaches the review.
+while IFS= read -r name; do
+  unset "$name" 2>/dev/null || true
+done < <(compgen -e)
+
+export PATH=/usr/bin:/bin HOME=/nonexistent LANG=C.UTF-8 OPENROUTER_API_KEY="$key"
+for setting in ${envargs[@]+"${envargs[@]}"}; do
+  export "${setting%%=*}=${setting#*=}"
+done
+export RB_REPO="$job/repo" RB_DIFF="$job/pr/diff.patch" RB_PR_JSON="$job/pr/pr.json" RB_PRIOR_JSON="$job/pr/prior.json" \
+  RB_OUT="$job/out/findings.json" RB_DETAILS_OUT="$job/out/details.json"
+exec "$node" "$job/code/src/main.ts"

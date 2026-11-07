@@ -22,18 +22,21 @@ key=${OPENROUTER_API_KEY-}
 unset OPENROUTER_API_KEY GITHUB_TOKEN GH_TOKEN
 
 job=$(mktemp -d "$jobs_root/XXXXXXXXXX")
-chmod 0750 "$job"
+# Setgid, so the directories made inside the job take its group, the reviewer's, and out/ is one
+# the reviewer can write. chmod would clear the bit that the jobs directory gave the job.
+chmod 2750 "$job"
 # The trap below runs this function on exit.
 # shellcheck disable=SC2329
 cleanup() {
-  chmod -R u+w "$job" 2>/dev/null || true
+  # Only directories are made writable. The staged files are hard links into the checkout, and
+  # changing their modes would change the checkout's.
+  find "$job" -type d -exec chmod u+w {} + 2>/dev/null || true
   rm -rf "$job" || echo "::warning::could not remove the review job $job"
 }
 trap cleanup EXIT
 
 # Copies a tree by hard links, which needs no extra space. When links cannot be made, for example
-# across file systems, it copies the bytes instead. The partial copy is removed first, so that no
-# file of the job is ever a link into the checkout that the reviewer could write through.
+# across file systems, it copies the bytes instead.
 stage() {
   if cp -al "$1" "$2" 2>/dev/null; then
     return 0
@@ -56,17 +59,27 @@ cp "$settings" "$job/env"
 chmod 0644 "$job"/pr/* "$job/env"
 # Setgid and group-writable for the reviewer only, so its output can be written but nothing else.
 chmod 2770 "$job/out"
+
+# A staged file that is a hard link shares the checkout's file, so the reviewer could change the
+# checkout through it only if the file is writable by others. The reviewer is neither the owner of
+# these files nor in their group, so any file that others can write is refused here, before sudo.
+unsafe=$(find "$job/repo" "$job/code" -perm -o+w)
+if [ -n "$unsafe" ]; then
+  echo "::error::these are writable by others, so the reviewer could write them: $unsafe" >&2
+  exit 1
+fi
 echo "rev-engine: staged" >&2
 
 status=0
 printf '%s\n' "$key" | sudo -n -u "$reviewer" "$wrapper" "$job" || status=$?
 key=
 
-# The reviewer can no longer write the out directory, so what is copied back is what it wrote.
-# Only regular files are copied, so a link it made is never followed.
+# chmod 0750 removes the group's write access to out/, so the reviewer can no longer create entries
+# there. Only a regular file that the review user owns, with one link, is copied back, so a link
+# the reviewer made to anything else is never followed.
 chmod 0750 "$job/out"
 mkdir -p "$source_dir/out"
-find "$job/out" -maxdepth 1 -type f -name '*.json' -exec cp {} "$source_dir/out/" \;
+find "$job/out" -maxdepth 1 -type f -name '*.json' -user "$reviewer" -links 1 -exec cp {} "$source_dir/out/" \;
 
 echo "rev-engine: review finished (exit $status)" >&2
 exit "$status"

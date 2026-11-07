@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -267,6 +267,9 @@ test("the review settings step holds no secret", () => {
 });
 
 const NODE_DIR = join(ROOT, "action", "node");
+// The reviewer user is not a real account in these tests, so the current user stands in for it.
+const REVIEW_USER = userInfo().username;
+const IS_ROOT = process.getuid?.() === 0;
 const KEY = "sk-test-model-key";
 const TOKEN_MARKER = "ghs-token-marker";
 
@@ -282,7 +285,7 @@ function patchedEntry(root: string): string {
 
 // A stand-in for the Node binary. It records its environment and argument, and writes the two
 // result files and a link that points outside the job, as a hostile review could.
-function fakeNode(root: string, exitCode: number): void {
+function fakeNode(root: string, exitCode: number, extra: string[] = []): void {
   writeFileSync(join(root, "node-shim"), [
     "#!/bin/bash",
     `env > '${join(root, "node-env")}'`,
@@ -291,6 +294,7 @@ function fakeNode(root: string, exitCode: number): void {
     'printf "{}" > "$(dirname "$RB_OUT")/findings.json"',
     'printf "{}" > "$(dirname "$RB_OUT")/details.json"',
     'ln -s /etc/hosts "$(dirname "$RB_OUT")/evil.json"',
+    ...extra,
     `exit ${exitCode}`,
     "",
   ].join("\n"), { mode: 0o755 });
@@ -300,9 +304,10 @@ function fakeNode(root: string, exitCode: number): void {
 // runs the command it was given, with the stdin it received.
 function fakeSudo(root: string): void {
   shim(root, "sudo", [
-    `[ "$1 $2 $3" = "-n -u reviewer" ] || exit 98`,
+    `[ "$1 $2 $3" = "-n -u ${REVIEW_USER}" ] || exit 98`,
     `printf '%s\\n' "$@" > '${join(root, "sudo-argv")}'`,
     `env > '${join(root, "sudo-env")}'`,
+    `for dir in "$5" "$5/out"; do if [ -g "$dir" ]; then echo "$dir setgid"; else echo "$dir no-setgid"; fi; done > '${join(root, "setgid")}'`,
     `cat > '${join(root, "sudo-stdin")}'`,
     `"$4" "$5" < '${join(root, "sudo-stdin")}'`,
   ].join("\n"));
@@ -392,7 +397,7 @@ test("review.sh runs the review as the reviewer user, with the key on stdin and 
   assert.equal(result.status, 0, result.stderr);
   const argv = lines(join(sandboxed.root, "sudo-argv"));
   const job = argv[4]!;
-  assert.deepEqual(argv.slice(0, 4), ["-n", "-u", "reviewer", sandboxed.wrapper]);
+  assert.deepEqual(argv.slice(0, 4), ["-n", "-u", REVIEW_USER, sandboxed.wrapper]);
   assert.equal(readFileSync(join(sandboxed.root, "sudo-stdin"), "utf8"), `${KEY}\n`);
   assert.ok(!argv.join("\n").includes(KEY), "key in sudo arguments");
   const sudoEnv = readFileSync(join(sandboxed.root, "sudo-env"), "utf8");
@@ -417,6 +422,54 @@ test("review.sh runs the review as the reviewer user, with the key on stdin and 
   assert.deepEqual(readdirSync(sandboxed.jobs), []);
 });
 
+test("review.sh keeps the job directory and out/ setgid, so out/ takes the reviewer's group", () => {
+  const sandboxed = reviewSandbox(0);
+  const result = runReview(sandboxed);
+
+  assert.equal(result.status, 0, result.stderr);
+  const job = lines(join(sandboxed.root, "sudo-argv"))[4]!;
+  assert.deepEqual(lines(join(sandboxed.root, "setgid")), [`${job} setgid`, `${job}/out setgid`]);
+});
+
+test("review.sh keeps the model key out of every argument list", () => {
+  const sandboxed = reviewSandbox(0);
+  const result = runReview(sandboxed);
+
+  assert.equal(result.status, 0, result.stderr);
+  const envArgv = existsSync(join(sandboxed.root, "env-argv")) ? readFileSync(join(sandboxed.root, "env-argv"), "utf8") : "";
+  assert.ok(!envArgv.includes(KEY), "key in the argument list of env");
+  assert.ok(!lines(join(sandboxed.root, "node-argv")).join("\n").includes(KEY), "key in the arguments of node");
+});
+
+test("review.sh copies back only the review's own regular files with one link, not a hard link to a staged file", () => {
+  const sandboxed = reviewSandbox(0, [`ln "$RB_REPO/README.md" "$(dirname "$RB_OUT")/leak.json"`]);
+  const result = runReview(sandboxed);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(readdirSync(join(sandboxed.temp, "out")).sort(), ["details.json", "findings.json"]);
+});
+
+test("review.sh leaves the checkout's file modes alone, so a read-only file stays read-only", () => {
+  const sandboxed = reviewSandbox(0);
+  const readme = join(sandboxed.checkout, "README.md");
+  chmodSync(readme, 0o444);
+  const result = runReview(sandboxed);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(statSync(readme).mode & 0o777, 0o444);
+});
+
+test("review.sh refuses a checkout file that others can write, before sudo runs", () => {
+  const sandboxed = reviewSandbox(0);
+  chmodSync(join(sandboxed.checkout, "README.md"), 0o666);
+  const result = runReview(sandboxed);
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /::error::.*README\.md/);
+  assert.equal(existsSync(join(sandboxed.root, "sudo-argv")), false, "sudo ran");
+  assert.deepEqual(readdirSync(sandboxed.jobs), []);
+});
+
 test("review.sh passes the review's exit status through and removes the job", () => {
   const sandboxed = reviewSandbox(3);
   const result = runReview(sandboxed);
@@ -437,7 +490,55 @@ test("provision.sh --print-sudoers prints the one sudo rule and needs no root", 
   assert.equal(result.stdout, "runner ALL=(reviewer) NOPASSWD: /usr/local/libexec/rev-engine/review ^/var/lib/rev-engine/jobs/[A-Za-z0-9]+$\n");
 });
 
-function reviewSandbox(exitCode: number) {
+// provision.sh's checks that need no root run before anything is changed, so they can be tested here.
+// Shims stand in for sudo and getent, which the host provides.
+function provisionSandbox(sudoVersion: string, homeMode: number) {
+  const root = sandbox();
+  const home = join(root, "home");
+  mkdirSync(home);
+  chmodSync(home, homeMode);
+  shim(root, "sudo", `echo "Sudo version ${sudoVersion}"`);
+  shim(root, "getent", `echo "$2:x:1000:1000::${home}:/bin/sh"`);
+  const nodeDir = join(root, "node");
+  mkdirSync(join(nodeDir, "bin"), { recursive: true });
+  return { root, home, nodeDir };
+}
+
+function provision(root: string, args: string[], cwd = root) {
+  return spawnSync("bash", [join(NODE_DIR, "provision.sh"), ...args], { encoding: "utf8", cwd, env: shimEnv(root, {}) });
+}
+
+test("provision.sh refuses sudo older than 1.9.10, and goes on with 1.9.10 or later", () => {
+  for (const version of ["1.8.31", "1.9.9p1"]) {
+    const { root, nodeDir } = provisionSandbox(version, 0o700);
+    const result = provision(root, ["--node-dir", nodeDir]);
+    assert.equal(result.status, 1, version);
+    assert.match(result.stderr, /provision\.sh: sudo 1\.9\.10 or later is required, found /, version);
+  }
+  for (const version of ["1.9.10", "1.9.17p2"]) {
+    const { root, nodeDir } = provisionSandbox(version, 0o700);
+    const result = provision(root, ["--node-dir", nodeDir]);
+    assert.doesNotMatch(result.stderr, /sudo/, version);
+  }
+});
+
+test("provision.sh refuses a runner home that others can use, and says to chmod o-rwx", () => {
+  const { root, home, nodeDir } = provisionSandbox("1.9.17p2", 0o755);
+  const result = provision(root, ["--node-dir", nodeDir]);
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.ok(result.stderr.includes(`chmod o-rwx ${home}`), result.stderr);
+});
+
+test("provision.sh resolves --node-dir to an absolute path before it checks the directory", { skip: IS_ROOT ? "root owns the files it would check" : false }, () => {
+  const { root, nodeDir } = provisionSandbox("1.9.17p2", 0o700);
+  const result = provision(root, ["--node-dir", "node"]);
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.ok(result.stderr.includes(`${nodeDir} is not owned by root`), result.stderr);
+});
+
+function reviewSandbox(exitCode: number, extra: string[] = []) {
   const root = sandbox();
   const jobs = join(root, "jobs");
   mkdirSync(jobs);
@@ -458,8 +559,13 @@ function reviewSandbox(exitCode: number) {
   writeFileSync(join(temp, "pr", "pr.json"), "{}\n");
   writeFileSync(join(temp, "review.env"), "RB_NWO=owner/repo\nRB_ATTEMPT=1\n");
   fakeSudo(root);
-  fakeNode(root, exitCode);
-  return { root, action, temp, jobs, wrapper: patchedEntry(root) };
+  fakeNode(root, exitCode, extra);
+  // Records the argument list of every env call, so a key passed to env would show up here.
+  shim(root, "env", [
+    `[ "$#" -eq 0 ] || printf '%s\\n' "$@" >> '${join(root, "env-argv")}'`,
+    `exec /usr/bin/env "$@"`,
+  ].join("\n"));
+  return { root, action, checkout, temp, jobs, wrapper: patchedEntry(root) };
 }
 
 function runReview(sandboxed: ReturnType<typeof reviewSandbox>) {
@@ -474,7 +580,7 @@ function runReview(sandboxed: ReturnType<typeof reviewSandbox>) {
       RUNNER_TEMP: join(sandboxed.root, "tmp"),
       REV_ENGINE_JOBS: sandboxed.jobs,
       REV_ENGINE_WRAPPER: sandboxed.wrapper,
-      REV_ENGINE_REVIEW_USER: "reviewer",
+      REV_ENGINE_REVIEW_USER: REVIEW_USER,
     },
   });
 }
