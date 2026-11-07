@@ -77,6 +77,7 @@ The benchmark publishes all 219 pull requests and their expected findings. That 
 ```sh
 npm run check                          # typecheck and unit tests
 scripts/local-run.sh smoke --pr 0      # one benchmark pull request, end to end
+npm run test:linux                     # the unit tests on Linux, after changing the action's shell scripts
 ```
 
 Run `npm run check` before every commit. Run the smoke test after any change to the prompts, the tool loop or the Dockerfile.

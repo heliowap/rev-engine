@@ -100,7 +100,7 @@ With `runtime: node`, the review runs on a self-hosted runner without Docker, as
    sudo action/node/provision.sh --node-dir "/opt/node-v$VERSION-linux-x64" --runner-user <runner user>
    ```
 
-   The host needs sudo 1.9.10 or later and git 2.31 or later, since the diff step passes its auth header with `GIT_CONFIG_COUNT`. The script refuses a Node directory that is not owned by root or is writable by its group or others, and a runner home that others can read, write or enter. If it refuses the home, run `chmod o-rwx <runner home>` and run the script again.
+   The host needs sudo 1.9.10 or later, git 2.31 or later, since the diff step passes its auth header with `GIT_CONFIG_COUNT`, and `gh` and `jq`, which the action's first steps use. The script refuses a Node directory that is not owned by root or is writable by its group or others, and a runner home that others can read, write or enter. If it refuses the home, run `chmod o-rwx <runner home>` and run the script again.
 
 3. Remove the runner user from the `docker` group, then restart the runner services.
 
