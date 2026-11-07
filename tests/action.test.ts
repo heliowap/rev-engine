@@ -165,3 +165,103 @@ test("action.yml writes the diff with diff.sh and the variables it reads", () =>
     assert.match(diff, new RegExp(`^ +${name}: `, "m"), `missing ${name}`);
   }
 });
+
+// review-env.sh reads the settings from its environment. A clean environment shows that nothing
+// else leaks into its output.
+function reviewEnv(vars: Record<string, string>) {
+  return bash("review-env.sh", [], { PATH: process.env.PATH ?? "/usr/bin:/bin", ...vars });
+}
+
+const SETTINGS: Record<string, string> = {
+  RB_NWO: "owner/repo",
+  RB_PR_NUMBER: "7",
+  RB_BASE: "a".repeat(40),
+  RB_HEAD: "b".repeat(40),
+  RB_MODEL_BASE_URL: "https://models.example.test/v1",
+  RB_CONFIG_MODEL: "vendor/model-a",
+  RB_CONFIG_TIME_BUDGET: "780",
+  RB_CONFIG_FIT: "vendor/model-a",
+  RB_CONFIG_MAX_TURNS: "40",
+  RB_CONFIG_SECOND_LOOK: "on",
+  RB_CONFIG_VERIFY: "lenient",
+  RB_CONFIG_EFFORT: "high",
+  RB_CONFIG_WRAP_UP: "30",
+};
+const SETTING_NAMES = Object.keys(SETTINGS);
+const AGENT_EXTRAS = [
+  "RB_CONFIG_MODE=agent",
+  "RB_CONFIG_SWARM=on",
+  "RB_CONFIG_SWARM_PROVIDERS=together",
+  "RB_CONFIG_SWARM_TARGET=60",
+  "RB_CONFIG_SWARM_LIMIT=90",
+  "RB_CONFIG_SWARM_EFFORT=none",
+  "RB_CONFIG_SWARM_CONTEXT=rich",
+  "RB_CONFIG_SWARM_EVIDENCE=off",
+];
+
+test("review-env prints the human settings, one NAME=VALUE line each, and no secret", () => {
+  const secrets = ["sk-test-secret", "ghs-test-secret", "gho-test-secret"];
+  const result = reviewEnv({
+    ...SETTINGS,
+    MODE: "human",
+    AGENT_MODEL: "vendor/agent-b",
+    OPENROUTER_API_KEY: secrets[0]!,
+    GITHUB_TOKEN: secrets[1]!,
+    GH_TOKEN: secrets[2]!,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const expected = [...SETTING_NAMES.map((name) => `${name}=${SETTINGS[name]}`), "RB_ATTEMPT=1"];
+  assert.deepEqual(result.stdout.trimEnd().split("\n"), expected);
+  for (const secret of secrets) assert.ok(!`${result.stdout}${result.stderr}`.includes(secret));
+});
+
+test("review-env leaves out the empty settings, so the reviewer keeps its defaults", () => {
+  const result = reviewEnv({ ...SETTINGS, MODE: "human", RB_CONFIG_EFFORT: "", RB_CONFIG_WRAP_UP: "" });
+
+  assert.equal(result.status, 0, result.stderr);
+  const lines = result.stdout.trimEnd().split("\n");
+  assert.ok(!lines.some((line) => line.startsWith("RB_CONFIG_EFFORT=") || line.startsWith("RB_CONFIG_WRAP_UP=")));
+  assert.ok(lines.includes("RB_ATTEMPT=1"));
+});
+
+test("review-env runs an agent review with the agent model and the eight swarm settings", () => {
+  const result = reviewEnv({ ...SETTINGS, MODE: "agent", AGENT_MODEL: "vendor/agent-b" });
+
+  assert.equal(result.status, 0, result.stderr);
+  const lines = result.stdout.trimEnd().split("\n");
+  assert.ok(lines.includes("RB_CONFIG_MODEL=vendor/agent-b"));
+  assert.ok(!lines.includes("RB_CONFIG_MODEL=vendor/model-a"));
+  for (const extra of AGENT_EXTRAS) assert.ok(lines.includes(extra), `missing ${extra}`);
+  assert.ok(lines.includes("RB_ATTEMPT=1"));
+});
+
+test("review-env refuses a mode other than agent or human, and a value with a line break", () => {
+  const robot = reviewEnv({ ...SETTINGS, MODE: "robot" });
+  assert.notEqual(robot.status, 0);
+  assert.match(robot.stderr, /::error::/);
+
+  const broken = reviewEnv({ ...SETTINGS, MODE: "human", RB_CONFIG_EFFORT: "high\nRB_CONFIG_MODE=agent" });
+  assert.notEqual(broken.status, 0);
+  assert.match(broken.stderr, /::error::/);
+  assert.equal(broken.stdout, "");
+});
+
+function inputNamed(name: string): string {
+  const inputs = actionYml.split("\ninputs:\n")[1]!.split("\nruns:")[0]!;
+  const block = inputs.split(/\n(?=  [a-z-]+:\n)/).find((chunk) => chunk.startsWith(`  ${name}:\n`));
+  assert.ok(block, `no input named ${name}`);
+  return block;
+}
+
+test("action.yml has the five time inputs, each empty by default", () => {
+  for (const name of ["max-turns", "second-look", "verify", "effort", "wrap-up"]) {
+    assert.match(inputNamed(name), /^    default: ""$/m, name);
+  }
+});
+
+test("the review settings step holds no secret", () => {
+  const settings = stepNamed("Write the review settings");
+  assert.match(settings, /review-env\.sh/);
+  assert.doesNotMatch(settings, /openrouter-api-key|OPENROUTER_API_KEY|github-token|GITHUB_TOKEN|GH_TOKEN/);
+});

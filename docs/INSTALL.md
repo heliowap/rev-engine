@@ -73,6 +73,11 @@ An agent can read the whole list and decide what to fix. There is no assessment 
 | `mode` | `human` | The review to run when the comment names none, or when the workflow is started by hand. |
 | `agent-model` | `deepseek/deepseek-v4.1-flash-1017` | OpenRouter model the swarm of an agent review uses. |
 | `allow-forks` | `false` | Set to `true` to review pull requests from forks. |
+| `max-turns` | empty, which keeps the reviewer's `40` | Model turns allowed per review or verification pass. |
+| `second-look` | empty, which keeps `on` | What a reviewer does after its first submission: `on`, `sweep`, `sweep-low`, `small` or `off`. |
+| `verify` | empty, which keeps `lenient` | `lenient`, `strict` or `off`: how the verification pass treats rejected findings. |
+| `effort` | empty, the provider's default | Reasoning effort, for models that accept one. |
+| `wrap-up` | empty, which keeps `100` | Seconds each review, verification and fit pass keeps back at the end to write its submission. Lower it together with `time-budget`. |
 
 ## Security
 
