@@ -75,7 +75,7 @@ An agent can read the whole list and decide what to fix. There is no assessment 
 | `allow-forks` | `false` | Set to `true` to review pull requests from forks. |
 | `max-turns` | empty | Model turns allowed per review or verification pass. Empty keeps the reviewer's default (see [SETTINGS.md](SETTINGS.md)). |
 | `second-look` | empty | Human reviews only. What a reviewer does after its first submission: `on`, `sweep`, `sweep-low`, `small` or `off`. Empty keeps the reviewer's default (see [SETTINGS.md](SETTINGS.md)). |
-| `effort` | empty | Human reviews only. Reasoning effort, for models that accept one. Empty keeps the reviewer's default (see [SETTINGS.md](SETTINGS.md)). |
+| `effort` | empty | Human reviews only. Reasoning effort, for models that accept one. Empty keeps the provider's default (see [SETTINGS.md](SETTINGS.md)). |
 | `wrap-up` | empty | Human reviews only. Seconds each review, verification and fit pass keeps back at the end to write its submission. Lower it together with `time-budget`. Empty keeps the reviewer's default (see [SETTINGS.md](SETTINGS.md)). |
 | `runtime` | `docker` | Where the review step runs: `docker` builds and runs the image; `node` runs the code with Node 24 on a prepared self-hosted runner. See [Self-hosted runner without Docker](#self-hosted-runner-without-docker). |
 
@@ -92,7 +92,7 @@ With `runtime: node`, the review runs on a self-hosted runner without Docker, as
    sudo tar --no-same-owner -xJf "node-v$VERSION-linux-x64.tar.xz" -C /opt
    ```
 
-   `--no-same-owner` makes root own the extracted files. `provision.sh` checks that the Node directory is owned by root and not writable by others.
+   `--no-same-owner` makes root own the extracted files. `provision.sh` checks that the Node directory is owned by root and not writable by its group or others.
 
 2. From a checkout of this repository, run the provisioning script as root. It creates the `reviewer` user, the job directory, the sudo rule and the Node link:
 
@@ -100,7 +100,7 @@ With `runtime: node`, the review runs on a self-hosted runner without Docker, as
    sudo action/node/provision.sh --node-dir "/opt/node-v$VERSION-linux-x64" --runner-user <runner user>
    ```
 
-   The host needs sudo 1.9.10 or later. The script refuses a Node directory that is not owned by root or is writable by others, and a runner home that others can read, write or enter. If it refuses the home, run `chmod o-rwx <runner home>` and run the script again.
+   The host needs sudo 1.9.10 or later and git 2.31 or later, since the diff step passes its auth header with `GIT_CONFIG_COUNT`. The script refuses a Node directory that is not owned by root or is writable by its group or others, and a runner home that others can read, write or enter. If it refuses the home, run `chmod o-rwx <runner home>` and run the script again.
 
 3. Remove the runner user from the `docker` group, then restart the runner services.
 
