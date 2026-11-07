@@ -16,14 +16,14 @@ settings=${REV_ENGINE_ENV_FILE:-$RUNNER_TEMP/rev-engine-prime/review.env}
 checkout=${REV_ENGINE_CHECKOUT:-$GITHUB_WORKSPACE/rev-engine-prime-checkout}
 source_dir=$RUNNER_TEMP/rev-engine-prime
 
-# The key stays in this shell's variable only until it is written to sudo's stdin. No other secret
-# is passed on.
+# The key is passed on only through sudo's stdin; this process's own environment is readable only by
+# the runner user. No other secret is passed on.
 key=${OPENROUTER_API_KEY-}
 unset OPENROUTER_API_KEY GITHUB_TOKEN GH_TOKEN
 
 job=$(mktemp -d "$jobs_root/XXXXXXXXXX")
 # Setgid, so the directories made inside the job take its group, the reviewer's, and out/ is one
-# the reviewer can write. chmod would clear the bit that the jobs directory gave the job.
+# the reviewer can write. Set explicitly, since chmod may clear a directory's setgid bit (BSD does).
 chmod 2750 "$job"
 # The trap below runs this function on exit.
 # shellcheck disable=SC2329
@@ -63,9 +63,11 @@ chmod 2770 "$job/out"
 # A staged file that is a hard link shares the checkout's file, so the reviewer could change the
 # checkout through it only if the file is writable by others. The reviewer is neither the owner of
 # these files nor in their group, so any file that others can write is refused here, before sudo.
-unsafe=$(find "$job/repo" "$job/code" -perm -o+w)
+# Symbolic links are skipped: on Linux a link's mode is always 0777 and says nothing about its target.
+unsafe=$(find "$job/repo" "$job/code" ! -type l -perm -o+w)
 if [ -n "$unsafe" ]; then
-  echo "::error::these are writable by others, so the reviewer could write them: $unsafe" >&2
+  echo "::error::these are writable by others, so the reviewer could write them:" >&2
+  printf '%s\n' "$unsafe" >&2
   exit 1
 fi
 echo "rev-engine: staged" >&2

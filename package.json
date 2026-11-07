@@ -11,6 +11,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test \"tests/*.test.ts\"",
+    "test:linux": "docker run --rm -v \"$PWD\":/repo -w /repo node:24-slim sh -c 'apt-get update -qq && apt-get install -y -qq git jq >/dev/null && setpriv --reuid=node --regid=node --init-groups env HOME=/tmp GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=\"*\" node --test \"tests/*.test.ts\"'",
     "check": "npm run typecheck && npm test",
     "eval": "node evals/run.ts",
     "eval:add": "node evals/add.ts",

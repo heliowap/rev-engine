@@ -62,7 +62,7 @@ fi
 found=$(sudo -V 2>/dev/null | sed -n '1s/^Sudo version //p') || true
 sudo_version_ok "$found" || { echo "provision.sh: sudo 1.9.10 or later is required, found ${found:-none}" >&2; exit 1; }
 
-node_dir=$(cd "$node_dir" 2>/dev/null && pwd -P) || { echo "provision.sh: --node-dir is not a directory" >&2; exit 1; }
+node_dir=$(CDPATH='' cd -- "$node_dir" 2>/dev/null && pwd -P) || { echo "provision.sh: --node-dir is not a directory" >&2; exit 1; }
 
 # The runner's home must grant others nothing, so the reviewer cannot read the runner's files.
 home=$(getent passwd "$runner_user" 2>/dev/null | cut -d: -f6) || true

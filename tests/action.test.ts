@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -447,6 +447,41 @@ test("entry.sh refuses a job outside its directory, a link to a job or out direc
   }
 });
 
+test("entry.sh starts the review with only its own environment, so no leaked name or exported function reaches it", () => {
+  const root = sandbox();
+  const jobs = join(root, "jobs");
+  mkdirSync(jobs);
+  fakeNode(root, 0);
+  const entry = patchedEntry(root);
+  const dir = makeJob(jobs, "leakjob");
+
+  // env sets a name that is not a shell name, and bash exports a function into the environment of exec.
+  const result = spawnSync("env", ["BAD.NAME=leak", "bash", "-c", 'f() { :; }; export -f f; exec "$0" "$@"', entry, dir], {
+    encoding: "utf8",
+    input: `${KEY}\n`,
+    env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const nodeEnv = parseEnv(readFileSync(join(root, "node-env"), "utf8"));
+  assert.ok(!("BAD.NAME" in nodeEnv), "BAD.NAME reached the review");
+  assert.ok(!Object.keys(nodeEnv).some((name) => name.startsWith("BASH_FUNC") || name === "f"), "an exported function reached the review");
+  assert.equal(nodeEnv.OPENROUTER_API_KEY, KEY);
+});
+
+test("entry.sh takes one job directory from its caller, and nothing else", () => {
+  const root = sandbox();
+  const jobs = join(root, "jobs");
+  mkdirSync(jobs);
+  fakeNode(root, 0);
+  const entry = patchedEntry(root);
+  const dir = makeJob(jobs, "argcount1");
+
+  for (const args of [[], [dir, "other"], [dir, "clean", "extra"]]) {
+    assert.equal(runEntry(entry, args, `${KEY}\n`).status, 2, args.join(" "));
+  }
+});
+
 test("review.sh runs the review as the reviewer user, with the key on stdin and no GitHub token", () => {
   const sandboxed = reviewSandbox(0);
   const result = runReview(sandboxed);
@@ -516,14 +551,33 @@ test("review.sh leaves the checkout's file modes alone, so a read-only file stay
   assert.equal(statSync(readme).mode & 0o777, 0o444);
 });
 
-test("review.sh refuses a checkout file that others can write, before sudo runs", () => {
+test("review.sh refuses a checkout file that others can write, before sudo runs, and prints each path on its own line", () => {
   const sandboxed = reviewSandbox(0);
   chmodSync(join(sandboxed.checkout, "README.md"), 0o666);
   const result = runReview(sandboxed);
 
   assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, /::error::.*README\.md/);
+  const stderr = result.stderr.split("\n");
+  assert.equal(stderr.filter((line) => line.startsWith("::error::")).length, 1, result.stderr);
+  assert.ok(stderr.some((line) => /^\/.*\/repo\/README\.md$/.test(line)), result.stderr);
   assert.equal(existsSync(join(sandboxed.root, "sudo-argv")), false, "sudo ran");
+  assert.deepEqual(readdirSync(sandboxed.jobs), []);
+});
+
+test("review.sh stages a checkout with a symlink whose mode is 0777, and reviews it normally", () => {
+  // The staged checkout must still hold the link, so the stand-in review checks for it.
+  const sandboxed = reviewSandbox(0, [`test -L "$RB_REPO/link.md" || exit 9`]);
+  const link = join(sandboxed.checkout, "link.md");
+  symlinkSync("README.md", link);
+  // Linux gives every symlink mode 0777 already; macOS needs chmod, which changes the link itself with -h.
+  if (process.platform !== "linux") execFileSync("chmod", ["-h", "777", link]);
+  assert.equal(lstatSync(link).mode & 0o777, 0o777);
+
+  const result = runReview(sandboxed);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /rev-engine: review finished \(exit 0\)/);
+  assert.ok(existsSync(join(sandboxed.root, "sudo-argv")), "sudo did not run");
   assert.deepEqual(readdirSync(sandboxed.jobs), []);
 });
 
@@ -561,8 +615,8 @@ function provisionSandbox(sudoVersion: string, homeMode: number) {
   return { root, home, nodeDir };
 }
 
-function provision(root: string, args: string[], cwd = root) {
-  return spawnSync("bash", [join(NODE_DIR, "provision.sh"), ...args], { encoding: "utf8", cwd, env: shimEnv(root, {}) });
+function provision(root: string, args: string[], cwd = root, extra: Record<string, string> = {}) {
+  return spawnSync("bash", [join(NODE_DIR, "provision.sh"), ...args], { encoding: "utf8", cwd, env: shimEnv(root, extra) });
 }
 
 test("provision.sh refuses sudo older than 1.9.10, and goes on with 1.9.10 or later", () => {
@@ -590,6 +644,14 @@ test("provision.sh refuses a runner home that others can use, and says to chmod 
 test("provision.sh resolves --node-dir to an absolute path before it checks the directory", { skip: IS_ROOT ? "root owns the files it would check" : false }, () => {
   const { root, nodeDir } = provisionSandbox("1.9.17p2", 0o700);
   const result = provision(root, ["--node-dir", "node"]);
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.ok(result.stderr.includes(`${nodeDir} is not owned by root`), result.stderr);
+});
+
+test("provision.sh resolves --node-dir when CDPATH is set, since cd would print the directory it found", { skip: IS_ROOT ? "root owns the files it would check" : false }, () => {
+  const { root, nodeDir } = provisionSandbox("1.9.17p2", 0o700);
+  const result = provision(root, ["--node-dir", "node"], root, { CDPATH: root });
 
   assert.equal(result.status, 1, result.stderr);
   assert.ok(result.stderr.includes(`${nodeDir} is not owned by root`), result.stderr);
