@@ -50,7 +50,8 @@ The benchmark publishes all 219 pull requests and their expected findings. That 
 | `src/prior.ts` | Reads those earlier decisions and writes the prompt sections that carry them. |
 | `src/fit.ts` | The optional assessment of whether a change belongs in the project. |
 | `action.yml` | The GitHub Action that reviews a pull request when a maintainer asks. |
-| `action/` | Turns the findings file into one GitHub review and posts it, and collects the maintainer's decisions on earlier reviews (`collect.ts`, `decisions.ts`). |
+| `action/` | Turns the findings file into one GitHub review and posts it, and collects the maintainer's decisions on earlier reviews (`collect.ts`, `decisions.ts`). Also writes the diff (`diff.sh`) and the review settings (`review-env.sh`). |
+| `action/node/` | Runs the review step without Docker on a prepared self-hosted runner: staging, the reviewer-user entry point and host setup. |
 | `scripts/local-run.sh` | Builds the image and runs benchmark pull requests locally. |
 | `scripts/score.sh` | Scores runs with the benchmark's judging CLI, several at once. |
 | `scripts/match.ts` | Grounded scores from the judge's matching step alone, for `JUDGE_MODE=match`. |
