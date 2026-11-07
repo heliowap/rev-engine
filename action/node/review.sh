@@ -22,9 +22,11 @@ key=${OPENROUTER_API_KEY-}
 unset OPENROUTER_API_KEY GITHUB_TOKEN GH_TOKEN
 
 job=$(mktemp -d "$jobs_root/XXXXXXXXXX")
-# Setgid, so the directories made inside the job take its group, the reviewer's, and out/ is one
-# the reviewer can write. Set explicitly, since chmod may clear a directory's setgid bit (BSD does).
-chmod 2750 "$job"
+# The jobs directory is setgid, so the new job has the reviewer's group and is setgid too. Its
+# directories are made before the job's mode changes, because chmod by a user outside that group
+# clears the setgid bit (chmod(2)), and then out/ would take the runner's group.
+mkdir "$job/pr" "$job/code" "$job/out"
+chmod 0750 "$job"
 # The trap below runs this function on exit.
 # shellcheck disable=SC2329
 cleanup() {
@@ -46,7 +48,6 @@ stage() {
 }
 
 stage "$checkout/." "$job/repo"
-mkdir "$job/pr" "$job/code" "$job/out"
 cp "$source_dir/pr/diff.patch" "$source_dir/pr/pr.json" "$job/pr/"
 if [ -f "$source_dir/pr/prior.json" ]; then
   cp "$source_dir/pr/prior.json" "$job/pr/"
@@ -57,8 +58,8 @@ mkdir "$job/code/experiments"
 stage "$GITHUB_ACTION_PATH/experiments/prototypes" "$job/code/experiments/prototypes"
 cp "$settings" "$job/env"
 chmod 0644 "$job"/pr/* "$job/env"
-# Setgid and group-writable for the reviewer only, so its output can be written but nothing else.
-chmod 2770 "$job/out"
+# Group-writable for the reviewer only, so its output can be written but nothing else.
+chmod 0770 "$job/out"
 
 # A staged file that is a hard link shares the checkout's file, so the reviewer could change the
 # checkout through it only if the file is writable by others. The reviewer is neither the owner of

@@ -364,7 +364,7 @@ function fakeSudo(root: string): void {
     `[ "$1 $2 $3" = "-n -u ${REVIEW_USER}" ] || exit 98`,
     `printf '%s\\n' "$@" > '${join(root, "sudo-argv")}'`,
     `env > '${join(root, "sudo-env")}'`,
-    `for dir in "$5" "$5/out"; do if [ -g "$dir" ]; then echo "$dir setgid"; else echo "$dir no-setgid"; fi; done > '${join(root, "setgid")}'`,
+    `ls -ldn "$5" "$5/out" | awk '{print $4}' > '${join(root, "groups")}'`,
     `cat > '${join(root, "sudo-stdin")}'`,
     `"$4" "$5" < '${join(root, "sudo-stdin")}'`,
   ].join("\n"));
@@ -514,13 +514,16 @@ test("review.sh runs the review as the reviewer user, with the key on stdin and 
   assert.deepEqual(readdirSync(sandboxed.jobs), []);
 });
 
-test("review.sh keeps the job directory and out/ setgid, so out/ takes the reviewer's group", () => {
+// One user cannot reproduce the rule that clears setgid when a non-member of the group runs chmod,
+// so the review on a provisioned host is what proves the reviewer can write out/.
+test("review.sh gives out/ the job directory's group", () => {
   const sandboxed = reviewSandbox(0);
   const result = runReview(sandboxed);
 
   assert.equal(result.status, 0, result.stderr);
-  const job = lines(join(sandboxed.root, "sudo-argv"))[4]!;
-  assert.deepEqual(lines(join(sandboxed.root, "setgid")), [`${job} setgid`, `${job}/out setgid`]);
+  const [jobGroup, outGroup] = lines(join(sandboxed.root, "groups"));
+  assert.ok(jobGroup);
+  assert.equal(outGroup, jobGroup);
 });
 
 test("review.sh keeps the model key out of every argument list", () => {
