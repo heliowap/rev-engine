@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -264,4 +264,282 @@ test("the review settings step holds no secret", () => {
   const settings = stepNamed("Write the review settings");
   assert.match(settings, /review-env\.sh/);
   assert.doesNotMatch(settings, /openrouter-api-key|OPENROUTER_API_KEY|github-token|GITHUB_TOKEN|GH_TOKEN/);
+});
+
+const NODE_DIR = join(ROOT, "action", "node");
+const KEY = "sk-test-model-key";
+const TOKEN_MARKER = "ghs-token-marker";
+
+// entry.sh starts with two constants, which the tests point at the sandbox.
+function patchedEntry(root: string): string {
+  const text = readFileSync(join(NODE_DIR, "entry.sh"), "utf8")
+    .replace(/^jobs_root=.*$/m, `jobs_root=${join(root, "jobs")}`)
+    .replace(/^node=.*$/m, `node=${join(root, "node-shim")}`);
+  const path = join(root, "wrapper");
+  writeFileSync(path, text, { mode: 0o755 });
+  return path;
+}
+
+// A stand-in for the Node binary. It records its environment and argument, and writes the two
+// result files and a link that points outside the job, as a hostile review could.
+function fakeNode(root: string, exitCode: number): void {
+  writeFileSync(join(root, "node-shim"), [
+    "#!/bin/bash",
+    `env > '${join(root, "node-env")}'`,
+    `printf '%s\\n' "$@" > '${join(root, "node-argv")}'`,
+    `cat "$RB_REPO/README.md" > '${join(root, "node-readme")}'`,
+    'printf "{}" > "$(dirname "$RB_OUT")/findings.json"',
+    'printf "{}" > "$(dirname "$RB_OUT")/details.json"',
+    'ln -s /etc/hosts "$(dirname "$RB_OUT")/evil.json"',
+    `exit ${exitCode}`,
+    "",
+  ].join("\n"), { mode: 0o755 });
+}
+
+// A stand-in for sudo. It checks the flags, records its argument, environment and stdin, and then
+// runs the command it was given, with the stdin it received.
+function fakeSudo(root: string): void {
+  shim(root, "sudo", [
+    `[ "$1 $2 $3" = "-n -u reviewer" ] || exit 98`,
+    `printf '%s\\n' "$@" > '${join(root, "sudo-argv")}'`,
+    `env > '${join(root, "sudo-env")}'`,
+    `cat > '${join(root, "sudo-stdin")}'`,
+    `"$4" "$5" < '${join(root, "sudo-stdin")}'`,
+  ].join("\n"));
+}
+
+// A job directory with the four directories the review step creates and a settings file.
+function makeJob(jobs: string, name: string): string {
+  const dir = join(jobs, name);
+  for (const sub of ["repo", "pr", "code", "out"]) mkdirSync(join(dir, sub), { recursive: true });
+  writeFileSync(join(dir, "env"), "RB_ATTEMPT=1\n");
+  return dir;
+}
+
+function runEntry(entry: string, args: string[], stdin: string | undefined) {
+  return spawnSync("bash", [entry, ...args], { encoding: "utf8", input: stdin, env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } });
+}
+
+test("entry.sh accepts every settings line review-env.sh prints, for a human and an agent review", () => {
+  const root = sandbox();
+  mkdirSync(join(root, "jobs"));
+  fakeNode(root, 0);
+  const entry = patchedEntry(root);
+
+  for (const mode of ["human", "agent"]) {
+    const settings = reviewEnv({ ...SETTINGS, MODE: mode, AGENT_MODEL: "vendor/agent-b" });
+    assert.equal(settings.status, 0, settings.stderr);
+    const dir = makeJob(join(root, "jobs"), `${mode}job`);
+    writeFileSync(join(dir, "env"), settings.stdout);
+
+    const result = runEntry(entry, [dir], `${KEY}\n`);
+
+    assert.equal(result.status, 0, `${mode}: ${result.stderr}`);
+  }
+});
+
+test("entry.sh refuses a settings line outside its allowlist, naming it", () => {
+  const root = sandbox();
+  const jobs = join(root, "jobs");
+  mkdirSync(jobs);
+  fakeNode(root, 0);
+  const entry = patchedEntry(root);
+
+  for (const [index, line] of ["RB_REPO=/etc", "RB_TRANSCRIPT_OUT=x", "OPENROUTER_API_KEY=x", "PATH=x"].entries()) {
+    const dir = makeJob(jobs, `settings${index}`);
+    writeFileSync(join(dir, "env"), `RB_ATTEMPT=1\n${line}\n`);
+
+    const result = runEntry(entry, [dir], `${KEY}\n`);
+
+    assert.equal(result.status, 2, line);
+    assert.ok(result.stderr.includes(line.split("=")[0]!), `stderr does not name ${line}`);
+  }
+});
+
+test("entry.sh refuses a job outside its directory, a link to a job or out directory, and an empty key", () => {
+  const root = sandbox();
+  const jobs = join(root, "jobs");
+  mkdirSync(jobs);
+  fakeNode(root, 0);
+  const entry = patchedEntry(root);
+
+  const outside = makeJob(join(root, "elsewhere"), "outside1");
+  const dotdot = makeJob(root, "dotdot1");
+  const real = makeJob(jobs, "realjob1");
+  symlinkSync(real, join(jobs, "linked"));
+  const outLink = makeJob(jobs, "outlink1");
+  rmSync(join(outLink, "out"), { recursive: true });
+  symlinkSync(join(root, "elsewhere"), join(outLink, "out"));
+  const valid = makeJob(jobs, "nokey1");
+  const refused: Array<[string, string[], string | undefined]> = [
+    ["a job outside the jobs directory", [outside], `${KEY}\n`],
+    ["a path that leaves the jobs directory", [`${jobs}/../dotdot1`], `${KEY}\n`],
+    ["a job that is a symbolic link", [join(jobs, "linked")], `${KEY}\n`],
+    ["an out directory that is a symbolic link", [outLink], `${KEY}\n`],
+    ["an empty key on stdin", [valid], ""],
+  ];
+  void dotdot;
+
+  for (const [label, args, stdin] of refused) {
+    assert.equal(runEntry(entry, args, stdin).status, 2, label);
+  }
+});
+
+test("review.sh runs the review as the reviewer user, with the key on stdin and no GitHub token", () => {
+  const sandboxed = reviewSandbox(0);
+  const result = runReview(sandboxed);
+
+  assert.equal(result.status, 0, result.stderr);
+  const argv = lines(join(sandboxed.root, "sudo-argv"));
+  const job = argv[4]!;
+  assert.deepEqual(argv.slice(0, 4), ["-n", "-u", "reviewer", sandboxed.wrapper]);
+  assert.equal(readFileSync(join(sandboxed.root, "sudo-stdin"), "utf8"), `${KEY}\n`);
+  assert.ok(!argv.join("\n").includes(KEY), "key in sudo arguments");
+  const sudoEnv = readFileSync(join(sandboxed.root, "sudo-env"), "utf8");
+  assert.ok(!sudoEnv.includes(KEY) && !sudoEnv.includes(TOKEN_MARKER), "secret in sudo environment");
+
+  // bash adds PWD, SHLVL and _ to the environment of any script it starts, so they are not counted.
+  const nodeEnv = parseEnv(readFileSync(join(sandboxed.root, "node-env"), "utf8"));
+  const names = Object.keys(nodeEnv).filter((name) => !["PWD", "SHLVL", "_", "OLDPWD"].includes(name));
+  const allowed = ["PATH", "HOME", "LANG", "OPENROUTER_API_KEY"];
+  for (const name of allowed) assert.ok(names.includes(name), `missing ${name}`);
+  for (const name of names) assert.ok(allowed.includes(name) || name.startsWith("RB_"), `unexpected ${name}`);
+  assert.equal(nodeEnv.OPENROUTER_API_KEY, KEY);
+  assert.equal(nodeEnv.RB_NWO, "owner/repo");
+  for (const name of ["RB_REPO", "RB_DIFF", "RB_OUT"]) {
+    assert.ok(nodeEnv[name]?.startsWith(`${job}/`), `${name} is outside the job`);
+  }
+  assert.equal(lines(join(sandboxed.root, "node-argv")).at(-1), `${job}/code/src/main.ts`);
+  assert.equal(readFileSync(join(sandboxed.root, "node-readme"), "utf8"), "# repo\n");
+  assert.match(result.stderr, /rev-engine: review runs as /);
+  assert.match(result.stderr, /rev-engine: review finished \(exit 0\)/);
+  assert.deepEqual(readdirSync(join(sandboxed.temp, "out")).sort(), ["details.json", "findings.json"]);
+  assert.deepEqual(readdirSync(sandboxed.jobs), []);
+});
+
+test("review.sh passes the review's exit status through and removes the job", () => {
+  const sandboxed = reviewSandbox(3);
+  const result = runReview(sandboxed);
+
+  assert.equal(result.status, 3, result.stderr);
+  assert.match(result.stderr, /rev-engine: review finished \(exit 3\)/);
+  assert.deepEqual(readdirSync(join(sandboxed.temp, "out")).sort(), ["details.json", "findings.json"]);
+  assert.deepEqual(readdirSync(sandboxed.jobs), []);
+});
+
+test("provision.sh --print-sudoers prints the one sudo rule and needs no root", () => {
+  const result = spawnSync("bash", [join(NODE_DIR, "provision.sh"), "--print-sudoers", "--runner-user", "runner", "--review-user", "reviewer"], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "runner ALL=(reviewer) NOPASSWD: /usr/local/libexec/rev-engine/review ^/var/lib/rev-engine/jobs/[A-Za-z0-9]+$\n");
+});
+
+function reviewSandbox(exitCode: number) {
+  const root = sandbox();
+  const jobs = join(root, "jobs");
+  mkdirSync(jobs);
+  const action = join(root, "action");
+  mkdirSync(join(action, "src"), { recursive: true });
+  mkdirSync(join(action, "experiments", "prototypes"), { recursive: true });
+  writeFileSync(join(action, "package.json"), "{}\n");
+  writeFileSync(join(action, "src", "main.ts"), "\n");
+  writeFileSync(join(action, "experiments", "prototypes", "swarm.ts"), "\n");
+  const checkout = join(root, "ws", "rev-engine-prime-checkout");
+  mkdirSync(join(checkout, "src"), { recursive: true });
+  writeFileSync(join(checkout, "README.md"), "# repo\n");
+  writeFileSync(join(checkout, "src", "app.ts"), "\n");
+  const temp = join(root, "tmp", "rev-engine-prime");
+  mkdirSync(join(temp, "pr"), { recursive: true });
+  mkdirSync(join(temp, "out"), { recursive: true });
+  writeFileSync(join(temp, "pr", "diff.patch"), "diff\n");
+  writeFileSync(join(temp, "pr", "pr.json"), "{}\n");
+  writeFileSync(join(temp, "review.env"), "RB_NWO=owner/repo\nRB_ATTEMPT=1\n");
+  fakeSudo(root);
+  fakeNode(root, exitCode);
+  return { root, action, temp, jobs, wrapper: patchedEntry(root) };
+}
+
+function runReview(sandboxed: ReturnType<typeof reviewSandbox>) {
+  return spawnSync("bash", [join(NODE_DIR, "review.sh")], {
+    encoding: "utf8",
+    env: {
+      PATH: `${join(sandboxed.root, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      OPENROUTER_API_KEY: KEY,
+      GITHUB_TOKEN: TOKEN_MARKER,
+      GITHUB_ACTION_PATH: sandboxed.action,
+      GITHUB_WORKSPACE: join(sandboxed.root, "ws"),
+      RUNNER_TEMP: join(sandboxed.root, "tmp"),
+      REV_ENGINE_JOBS: sandboxed.jobs,
+      REV_ENGINE_WRAPPER: sandboxed.wrapper,
+      REV_ENGINE_REVIEW_USER: "reviewer",
+    },
+  });
+}
+
+function lines(path: string): string[] {
+  return readFileSync(path, "utf8").trimEnd().split("\n");
+}
+
+function parseEnv(text: string): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {};
+  for (const line of text.trimEnd().split("\n")) {
+    const at = line.indexOf("=");
+    env[line.slice(0, at)] = line.slice(at + 1);
+  }
+  return env;
+}
+
+function allSteps(): string[] {
+  return actionYml.split("\n    - name: ").slice(1);
+}
+
+function nameOf(step: string): string {
+  return step.split("\n")[0]!;
+}
+
+function stepsStartingWith(prefix: string): string[] {
+  const found = allSteps().filter((step) => nameOf(step).startsWith(prefix));
+  assert.ok(found.length > 0, `no step starts with ${prefix}`);
+  return found;
+}
+
+test("the collect and post steps hold the token and no model key; the review steps hold the key and no token", () => {
+  for (const prefix of ["Collect earlier decisions", "Post the review"]) {
+    for (const step of stepsStartingWith(prefix)) {
+      assert.match(step, /inputs\.github-token/, nameOf(step));
+      assert.doesNotMatch(step, /openrouter-api-key/, nameOf(step));
+    }
+  }
+  for (const step of stepsStartingWith("Review")) {
+    assert.match(step, /openrouter-api-key/, nameOf(step));
+    assert.doesNotMatch(step, /github-token|GITHUB_TOKEN|GH_TOKEN/, nameOf(step));
+  }
+});
+
+test("the node review step runs review.sh, and collect and post run the provisioned Node", () => {
+  assert.match(stepNamed("Review (node)"), /bash "\$GITHUB_ACTION_PATH\/action\/node\/review\.sh"/);
+  assert.match(stepNamed("Collect earlier decisions (node)"), /\/opt\/rev-engine-node\/bin\/node "\$GITHUB_ACTION_PATH\/action\/collect\.ts"/);
+  assert.match(stepNamed("Post the review (node)"), /\/opt\/rev-engine-node\/bin\/node "\$GITHUB_ACTION_PATH\/action\/post\.ts"/);
+});
+
+test("the runtime input defaults to docker, and the ask step rejects any other value", () => {
+  assert.match(inputNamed("runtime"), /^    default: docker$/m);
+  const ask = stepNamed("Check who asked");
+  assert.match(ask, /RUNTIME: \$\{\{ inputs\.runtime \}\}/);
+  assert.match(ask, /docker\|node\)/);
+});
+
+test("each docker step runs only for runtime docker, and each node step only for runtime node", () => {
+  const nodeSteps = allSteps().filter((step) => /\(node\)$/.test(nameOf(step)));
+  assert.ok(nodeSteps.length >= 3, "expected the three node steps");
+  for (const step of allSteps()) {
+    if (/\(node\)$/.test(nameOf(step))) {
+      assert.match(step, /\n      if: .*inputs\.runtime == 'node'/, nameOf(step));
+    } else if (/docker (run|build) /.test(step)) {
+      assert.match(step, /\n      if: .*inputs\.runtime == 'docker'/, nameOf(step));
+    }
+  }
 });

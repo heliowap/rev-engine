@@ -78,7 +78,38 @@ An agent can read the whole list and decide what to fix. There is no assessment 
 | `verify` | empty, which keeps `lenient` | `lenient`, `strict` or `off`: how the verification pass treats rejected findings. |
 | `effort` | empty, the provider's default | Reasoning effort, for models that accept one. |
 | `wrap-up` | empty, which keeps `100` | Seconds each review, verification and fit pass keeps back at the end to write its submission. Lower it together with `time-budget`. |
+| `runtime` | `docker` | Where the review step runs: `docker` builds and runs the image; `node` runs the code with Node 24 on a prepared self-hosted runner. See [Self-hosted runner without Docker](#self-hosted-runner-without-docker). |
+
+## Self-hosted runner without Docker
+
+With `runtime: node`, the review runs on a self-hosted runner without Docker, as a separate user. Prepare the runner once, on the host, with these generic steps:
+
+1. Download Node 24 from nodejs.org, check it against `SHASUMS256.txt`, and extract it under `/opt`:
+
+   ```sh
+   VERSION=24.x.y   # the release you chose
+   curl -fsSLO "https://nodejs.org/dist/v$VERSION/node-v$VERSION-linux-x64.tar.xz"
+   curl -fsSL "https://nodejs.org/dist/v$VERSION/SHASUMS256.txt" | grep " node-v$VERSION-linux-x64.tar.xz$" | sha256sum -c -
+   sudo tar -xJf "node-v$VERSION-linux-x64.tar.xz" -C /opt
+   ```
+
+2. From a checkout of this repository, run the provisioning script as root. It creates the `reviewer` user, the job directory, the sudo rule and the Node link:
+
+   ```sh
+   sudo action/node/provision.sh --node-dir "/opt/node-v$VERSION-linux-x64" --runner-user <runner user>
+   ```
+
+3. Remove the runner user from the `docker` group, then restart the runner services.
+
+4. Set `runtime: node` in the workflow.
+
+The node runtime gives these properties:
+
+- the `reviewer` user has no login shell and no home directory, and it cannot read the runner's home; check with `sudo -u reviewer ls <runner home>`, which must fail;
+- the model key arrives on the review command's stdin, never in its arguments or in sudo's environment;
+- the GitHub token stays with the collect and post steps, which hold no model key;
+- sudo allows one command, the review wrapper, and only with a job directory argument.
 
 ## Security
 
-The model only reads the pull request's code and never runs it. The review step holds the model key and no GitHub token, and the step that posts the review holds the GitHub token and no model key. Pull requests from forks are skipped unless `allow-forks` is `true`.
+The model only reads the pull request's code and never runs it. The review step holds the model key and no GitHub token, and the step that posts the review holds the GitHub token and no model key. The node runtime keeps the same separation, and its review runs as a separate user with one sudo rule. Pull requests from forks are skipped unless `allow-forks` is `true`.

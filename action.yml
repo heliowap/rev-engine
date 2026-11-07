@@ -56,6 +56,9 @@ inputs:
   wrap-up:
     description: Seconds each review, verification and fit pass keeps back at the end to write its submission. Empty keeps the reviewer's default.
     default: ""
+  runtime:
+    description: Where the review step runs. docker builds and runs the image. node runs the code with Node 24 on a self-hosted runner prepared with action/node/provision.sh, with the review step as a separate user that holds only the model key.
+    default: docker
 
 runs:
   using: composite
@@ -77,6 +80,7 @@ runs:
         COMMAND: ${{ inputs.command }}
         MODE: ${{ inputs.mode }}
         ALLOW_FORKS: ${{ inputs.allow-forks }}
+        RUNTIME: ${{ inputs.runtime }}
       run: |
         set -euo pipefail
         skip() { echo "::notice::No review: $1"; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0; }
@@ -94,6 +98,7 @@ runs:
           case "$word" in agent|human) MODE="$word" ;; esac
         fi
         case "$MODE" in agent|human) ;; *) echo "::error::mode must be agent or human"; exit 1 ;; esac
+        case "$RUNTIME" in docker|node) ;; *) echo "::error::runtime must be docker or node"; exit 1 ;; esac
         case "$number" in ''|*[!0-9]*) echo "::error::No pull request number. Set pr-number."; exit 1 ;; esac
 
         # Only people who can push to the repository may start a review, because each one costs money.
@@ -163,7 +168,7 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/action/review-env.sh" > "$RUNNER_TEMP/rev-engine-prime/review.env"
 
     - name: Build the reviewer
-      if: steps.ask.outputs.run == 'true'
+      if: steps.ask.outputs.run == 'true' && inputs.runtime == 'docker'
       shell: bash
       run: docker build --quiet --tag rev-engine-prime:action "$GITHUB_ACTION_PATH"
 
@@ -171,7 +176,7 @@ runs:
     # report decided findings again. It holds the GitHub token and no model key. A failure is
     # logged as a warning and leaves no file, and the review then runs without earlier decisions.
     - name: Collect earlier decisions
-      if: steps.ask.outputs.run == 'true'
+      if: steps.ask.outputs.run == 'true' && inputs.runtime == 'docker'
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
@@ -187,8 +192,23 @@ runs:
           rev-engine-prime:action /agent/action/collect.ts \
           || echo "::warning::Earlier decisions not collected: the collector exited with an error"
 
+    # The node runtime's collector: the GitHub token and no model key, as above.
+    - name: Collect earlier decisions (node)
+      if: steps.ask.outputs.run == 'true' && inputs.runtime == 'node'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITHUB_API_URL: ${{ github.api_url }}
+        GITHUB_GRAPHQL_URL: ${{ github.graphql_url }}
+        RB_NWO: ${{ github.repository }}
+        RB_PR_NUMBER: ${{ steps.ask.outputs.number }}
+        PRIOR_PATH: ${{ runner.temp }}/rev-engine-prime/pr/prior.json
+      run: |
+        /opt/rev-engine-node/bin/node "$GITHUB_ACTION_PATH/action/collect.ts" \
+          || echo "::warning::Earlier decisions not collected: the collector exited with an error"
+
     - name: Review
-      if: steps.ask.outputs.run == 'true'
+      if: steps.ask.outputs.run == 'true' && inputs.runtime == 'docker'
       shell: bash
       env:
         OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
@@ -204,6 +224,15 @@ runs:
           -e RB_OUT=/work/out/findings.json \
           rev-engine-prime:action
 
+    # The node runtime's review: the model key and no GitHub token. review.sh runs the review as
+    # the reviewer user and copies its JSON output back.
+    - name: Review (node)
+      if: steps.ask.outputs.run == 'true' && inputs.runtime == 'node'
+      shell: bash
+      env:
+        OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+      run: bash "$GITHUB_ACTION_PATH/action/node/review.sh"
+
     # Keep the findings with their severities and kinds, so a review can later be
     # turned into an eval case with evals/add.ts. They hold nothing the posted review does not.
     - name: Save the review
@@ -214,10 +243,11 @@ runs:
         path: ${{ runner.temp }}/rev-engine-prime/out/*.json
         if-no-files-found: ignore
 
-    # The posting script runs in the same image so the runner needs no Node of its own.
+    # The docker runtime runs the posting script in the same image, so the runner needs no Node of
+    # its own. The node runtime runs it with the provisioned Node, below.
     # It gets the GitHub token and no model key; the review above gets the model key and no GitHub token.
     - name: Post the review
-      if: steps.ask.outputs.run == 'true'
+      if: steps.ask.outputs.run == 'true' && inputs.runtime == 'docker'
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
@@ -238,3 +268,24 @@ runs:
           -e GITHUB_TOKEN -e GITHUB_API_URL -e GITHUB_GRAPHQL_URL -e RB_NWO -e RB_PR_NUMBER -e RB_HEAD -e REVIEW_MODEL -e REVIEW_MODE -e MIN_SEVERITY -e MAX_COMMENTS \
           -e FINDINGS_PATH=/work/out/details.json -e FIT_PATH=/work/out/fit.json -e DIFF_PATH=/work/pr/diff.patch \
           rev-engine-prime:action /agent/action/post.ts
+
+    # The node runtime's post: the GitHub token and no model key. The findings are the details file
+    # the review wrote, and the fit file and diff are the same ones the docker runtime reads.
+    - name: Post the review (node)
+      if: steps.ask.outputs.run == 'true' && inputs.runtime == 'node'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITHUB_API_URL: ${{ github.api_url }}
+        GITHUB_GRAPHQL_URL: ${{ github.graphql_url }}
+        RB_NWO: ${{ github.repository }}
+        RB_PR_NUMBER: ${{ steps.ask.outputs.number }}
+        RB_HEAD: ${{ steps.ask.outputs.head }}
+        REVIEW_MODEL: ${{ steps.ask.outputs.mode == 'agent' && format('a swarm of {0} agents', inputs.agent-model) || inputs.model }}
+        REVIEW_MODE: ${{ steps.ask.outputs.mode }}
+        MIN_SEVERITY: ${{ inputs.min-severity }}
+        MAX_COMMENTS: ${{ inputs.max-findings }}
+        FINDINGS_PATH: ${{ runner.temp }}/rev-engine-prime/out/details.json
+        FIT_PATH: ${{ runner.temp }}/rev-engine-prime/out/fit.json
+        DIFF_PATH: ${{ runner.temp }}/rev-engine-prime/pr/diff.patch
+      run: /opt/rev-engine-node/bin/node "$GITHUB_ACTION_PATH/action/post.ts"
