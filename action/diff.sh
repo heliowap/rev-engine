@@ -1,13 +1,19 @@
 #!/bin/bash
 # Writes the pull request diff to $OUT. The compare API gives the diff between the pinned base and
 # head without any history. When it fails, or its file count differs from the pull request's, git
-# in the checkout gives the same diff. Every fetch passes its header on the command line, so the
-# token is never written into a config file.
+# in the checkout gives the same diff. Each fetch gets the auth header in its environment, never in
+# its arguments or in a config file. GIT_CONFIG_COUNT needs git 2.31 or later.
 #
 # Env: GH_TOKEN REPO BASE HEAD PULL_JSON CHECKOUT OUT
 set -euo pipefail
 
 auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+# Runs git fetch in the checkout with the header in the environment of that one git.
+fetch_auth() {
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
+    git -C "$CHECKOUT" fetch "$@"
+}
+
 api_out="$OUT.api"
 written=no
 reason=""
@@ -28,9 +34,9 @@ if [ "$written" = no ]; then
   rm -f "$api_out"
   echo "::notice::Diff from git: $reason"
   if [ "$(git -C "$CHECKOUT" rev-parse --is-shallow-repository)" = true ]; then
-    git -C "$CHECKOUT" -c "http.extraheader=AUTHORIZATION: basic $auth" fetch --quiet --no-tags --unshallow origin "$BASE" "$HEAD"
+    fetch_auth --quiet --no-tags --unshallow origin "$BASE" "$HEAD"
   else
-    git -C "$CHECKOUT" -c "http.extraheader=AUTHORIZATION: basic $auth" fetch --quiet --no-tags origin "$BASE"
+    fetch_auth --quiet --no-tags origin "$BASE"
   fi
   git -C "$CHECKOUT" diff "$BASE...$HEAD" > "$OUT"
 fi
@@ -38,5 +44,5 @@ fi
 # The reviewer reads the base commit with git show, so it must be present, but the history
 # before it is not needed.
 if ! git -C "$CHECKOUT" cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  git -C "$CHECKOUT" -c "http.extraheader=AUTHORIZATION: basic $auth" fetch --quiet --no-tags --depth=1 origin "$BASE"
+  fetch_auth --quiet --no-tags --depth=1 origin "$BASE"
 fi

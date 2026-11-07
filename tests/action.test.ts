@@ -129,6 +129,30 @@ test("diff.sh takes the diff from git when the compare API fails, and fetches on
   assert.equal(spawnSync("git", ["-C", clone, "cat-file", "-e", `${base}^{commit}`], { env: { ...process.env, ...GIT_ENV } }).status, 0);
 });
 
+test("diff.sh gives git the auth header in its environment, so neither its argv nor the call log holds the token", () => {
+  const root = sandbox();
+  const { clone, base, head, expected } = shallowHistory(root);
+  // Resolved here, before the shim directory is put first on PATH.
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const log = join(root, "git-log");
+  shim(root, "git", [
+    `{ printf 'call:'; printf ' %s' "$@"; printf '\\n'; printf 'env:GIT_CONFIG_KEY_0=%s\\n' "\${GIT_CONFIG_KEY_0-}"; } >> '${log}'`,
+    `exec '${realGit}' "$@"`,
+  ].join("\n"));
+  shim(root, "gh", "exit 1");
+  const out = join(root, "diff.patch");
+
+  const result = runDiff(root, clone, base, head, 2, out);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(out, "utf8"), expected);
+  const recorded = readFileSync(log, "utf8");
+  const basic = Buffer.from("x-access-token:token-under-test").toString("base64");
+  assert.match(recorded, /call: -C .* fetch /);
+  assert.ok(recorded.includes("env:GIT_CONFIG_KEY_0=http.extraheader"), "the fetch got no header in its environment");
+  assert.ok(!recorded.includes("token-under-test") && !recorded.includes(basic), "the token or its encoding is in git's arguments");
+});
+
 test("diff.sh takes the diff from git when the compare file count differs from the pull request", () => {
   const root = sandbox();
   const { clone, base, head, expected } = shallowHistory(root);
@@ -183,7 +207,6 @@ const SETTINGS: Record<string, string> = {
   RB_CONFIG_FIT: "vendor/model-a",
   RB_CONFIG_MAX_TURNS: "40",
   RB_CONFIG_SECOND_LOOK: "on",
-  RB_CONFIG_VERIFY: "lenient",
   RB_CONFIG_EFFORT: "high",
   RB_CONFIG_WRAP_UP: "30",
 };
@@ -236,6 +259,32 @@ test("review-env runs an agent review with the agent model and the eight swarm s
   assert.ok(lines.includes("RB_ATTEMPT=1"));
 });
 
+test("review-env refuses an empty model for the review it runs, and prints nothing", () => {
+  const human = reviewEnv({ ...SETTINGS, MODE: "human", RB_CONFIG_MODEL: "" });
+  assert.equal(human.status, 1, human.stderr);
+  assert.match(human.stderr, /::error::/);
+  assert.equal(human.stdout, "");
+
+  const agent = reviewEnv({ ...SETTINGS, MODE: "agent", AGENT_MODEL: "" });
+  assert.equal(agent.status, 1, agent.stderr);
+  assert.match(agent.stderr, /::error::/);
+  assert.equal(agent.stdout, "");
+});
+
+test("review-env chooses the model by mode, so an agent review ignores an empty human model", () => {
+  const result = reviewEnv({ ...SETTINGS, MODE: "agent", AGENT_MODEL: "vendor/agent-b", RB_CONFIG_MODEL: "" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(result.stdout.split("\n").includes("RB_CONFIG_MODEL=vendor/agent-b"));
+});
+
+test("review-env does not pass RB_CONFIG_VERIFY on, since the action has no verify input", () => {
+  const result = reviewEnv({ ...SETTINGS, MODE: "human", RB_CONFIG_VERIFY: "strict" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(!result.stdout.includes("RB_CONFIG_VERIFY"));
+});
+
 test("review-env refuses a mode other than agent or human, and a value with a line break", () => {
   const robot = reviewEnv({ ...SETTINGS, MODE: "robot" });
   assert.notEqual(robot.status, 0);
@@ -254,9 +303,17 @@ function inputNamed(name: string): string {
   return block;
 }
 
-test("action.yml has the five time inputs, each empty by default", () => {
-  for (const name of ["max-turns", "second-look", "verify", "effort", "wrap-up"]) {
+test("action.yml has the four time inputs, each empty by default, and no verify input", () => {
+  for (const name of ["max-turns", "second-look", "effort", "wrap-up"]) {
     assert.match(inputNamed(name), /^    default: ""$/m, name);
+  }
+  assert.doesNotMatch(actionYml, /^  verify:$/m);
+  assert.doesNotMatch(actionYml, /RB_CONFIG_VERIFY/);
+});
+
+test("action.yml marks the inputs that only human reviews use", () => {
+  for (const name of ["second-look", "effort", "wrap-up"]) {
+    assert.match(inputNamed(name), /Human reviews only\./, name);
   }
 });
 
@@ -625,10 +682,26 @@ test("the collect and post steps hold the token and no model key; the review ste
   }
 });
 
-test("the node review step runs review.sh, and collect and post run the provisioned Node", () => {
+test("the node review step runs review.sh, and post runs the provisioned Node", () => {
   assert.match(stepNamed("Review (node)"), /bash "\$GITHUB_ACTION_PATH\/action\/node\/review\.sh"/);
-  assert.match(stepNamed("Collect earlier decisions (node)"), /\/opt\/rev-engine-node\/bin\/node "\$GITHUB_ACTION_PATH\/action\/collect\.ts"/);
   assert.match(stepNamed("Post the review (node)"), /\/opt\/rev-engine-node\/bin\/node "\$GITHUB_ACTION_PATH\/action\/post\.ts"/);
+});
+
+test("node mode writes the diff and runs the collector beside it, and the review waits for both", () => {
+  const name = "Write the diff and collect earlier decisions (node)";
+  const step = stepNamed(name);
+  assert.match(step, /\n      if: .*inputs\.runtime == 'node'/);
+  assert.match(step, /\/opt\/rev-engine-node\/bin\/node "\$GITHUB_ACTION_PATH\/action\/collect\.ts" &/);
+  assert.match(step, /bash "\$GITHUB_ACTION_PATH\/action\/diff\.sh"/);
+  assert.match(step, /wait "\$collector"/);
+  for (const variable of ["GH_TOKEN", "GITHUB_TOKEN", "BASE", "HEAD", "OUT", "RB_PR_NUMBER", "PRIOR_PATH"]) {
+    assert.match(step, new RegExp(`^ +${variable}: `, "m"), `missing ${variable}`);
+  }
+  assert.match(step, /inputs\.github-token/);
+  assert.doesNotMatch(step, /openrouter-api-key/);
+  const order = allSteps().map(nameOf);
+  assert.ok(order.indexOf(name) < order.indexOf("Review (node)"), "the review does not wait for the diff and collector");
+  assert.match(stepNamed("Write the diff"), /\n      if: .*inputs\.runtime == 'docker'/);
 });
 
 test("the runtime input defaults to docker, and the ask step rejects any other value", () => {
