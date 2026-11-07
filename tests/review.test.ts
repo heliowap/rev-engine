@@ -168,3 +168,20 @@ test("a decisions file with only fit answers leaves the reviewer and verifier as
   assert.ok(requests.every((request) => !request.prompt.includes("Earlier reviews of this pull request")));
   assert.ok(requests.every((request) => request.tools.every((tool) => !tool.includes("repeat_of"))));
 });
+
+test("a configured wrap-up reserve gives ordinary turns the time it frees", async () => {
+  const firstTimeout = async (env: Record<string, string>): Promise<number> => {
+    const timeouts: number[] = [];
+    const { chat } = reviewer([]);
+    const recording: Chat = async (request) => {
+      timeouts.push(request.timeoutMs);
+      return chat(request);
+    };
+    await review(configFor({ RB_CONFIG_RETRY_EMPTY: "off", ...env }), recording, () => {});
+    return timeouts[0]!;
+  };
+  const configured = await firstTimeout({ RB_CONFIG_TIME_BUDGET: "300", RB_CONFIG_WRAP_UP: "20" });
+  assert.ok(configured >= 150_000 && configured <= 160_000, String(configured));
+  const defaulted = await firstTimeout({ RB_CONFIG_TIME_BUDGET: "300" });
+  assert.ok(defaulted <= 80_000, String(defaulted));
+});

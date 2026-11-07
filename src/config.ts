@@ -61,6 +61,8 @@ export interface Config {
   /** Wall-clock budget for the whole run. */
   budgetMs: number;
   maxTurns: number;
+  /** Time each agent keeps back for its submission; null keeps the agent's default. */
+  wrapUpMs: number | null;
 }
 
 export type ReviewMode = "agent" | "human";
@@ -166,6 +168,7 @@ export function loadConfig(env: Env): Config {
     maxFindings: integer(env, "RB_CONFIG_MAX_FINDINGS", DEFAULT_MAX_FINDINGS[mode], 1, 100),
     budgetMs: integer(env, "RB_CONFIG_TIME_BUDGET", 780, 60, 7200) * 1000,
     maxTurns: integer(env, "RB_CONFIG_MAX_TURNS", 40, 2, 200),
+    wrapUpMs: env.RB_CONFIG_WRAP_UP?.trim() ? integer(env, "RB_CONFIG_WRAP_UP", 100, 10, 600) * 1000 : null,
   };
 }
 
@@ -187,5 +190,6 @@ export function describeSettings(config: Config): string {
     `max_findings=${config.maxFindings}`,
     `time_budget=${config.budgetMs / 1000}`,
     `max_turns=${config.maxTurns}`,
+    ...(config.wrapUpMs === null ? [] : [`wrap_up=${config.wrapUpMs / 1000}`]),
   ].join(" ");
 }

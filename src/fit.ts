@@ -172,6 +172,8 @@ export interface FitOptions {
   workspace: Workspace;
   deadline: number;
   maxTurns: number;
+  /** Time kept back for the submission; omitted keeps the agent's default. */
+  wrapUpMs?: number;
   log: (message: string) => void;
 }
 
@@ -186,6 +188,7 @@ export async function assessFit(options: FitOptions): Promise<FitAssessment | nu
       prompt: fitPrompt(options.pr, options.changed, options.diff, options.rules, options.documents, options.findings, minutes, turns, options.prior),
       workspace: options.workspace, submit: submitFit, deadline: options.deadline, maxTurns: turns, log,
       caller: `fit (${model})`,
+      ...(options.wrapUpMs === undefined ? {} : { wrapUpMs: options.wrapUpMs }),
     });
     const fit = parseFit(submission, model);
     log(fit ? `fit (${model}): ${fit.verdict}` : `fit (${model}): the submission had no usable verdict`);

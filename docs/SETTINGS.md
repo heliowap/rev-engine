@@ -21,6 +21,7 @@ If you use the GitHub Action, set its inputs instead. They are listed in [INSTAL
 | `RB_CONFIG_MAX_FINDINGS` | `25`, or `80` in agent mode | Cap on findings per pull request. |
 | `RB_CONFIG_TIME_BUDGET` | `780` | Seconds allowed for the whole run. |
 | `RB_CONFIG_MAX_TURNS` | `40` | Model turns allowed per review or verification pass. |
+| `RB_CONFIG_WRAP_UP` | `100` | Seconds each review, verification and fit pass keeps back at the end to write its submission. Ordinary turns may not use it. Lower it together with `RB_CONFIG_TIME_BUDGET`; the second look only starts when more than twice this is left. |
 
 Setting `RB_DETAILS_OUT` to a path makes the container also write the findings there with each one's severity, kind, title and detail as separate fields. The GitHub Action uses it, and the benchmark does not.
 

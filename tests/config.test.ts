@@ -94,3 +94,15 @@ test("turns on the swarm prototype, but not together with the naive baseline", (
   assert.throws(() => loadConfig({ ...BASE, RB_CONFIG_SWARM: "yes" }), /RB_CONFIG_SWARM/);
   assert.throws(() => loadConfig({ ...BASE, RB_CONFIG_SWARM: "on", RB_CONFIG_NAIVE: "on" }), /cannot both be on/);
 });
+
+test("reads the wrap-up reserve in seconds", () => {
+  assert.equal(loadConfig(BASE).wrapUpMs, null);
+  assert.ok(!describeSettings(loadConfig(BASE)).includes("wrap_up"));
+  assert.equal(loadConfig({ ...BASE, RB_CONFIG_WRAP_UP: "" }).wrapUpMs, null);
+  const config = loadConfig({ ...BASE, RB_CONFIG_WRAP_UP: "30" });
+  assert.equal(config.wrapUpMs, 30_000);
+  assert.ok(describeSettings(config).includes("max_turns=40 wrap_up=30"));
+  for (const value of ["9", "601", "x"]) {
+    assert.throws(() => loadConfig({ ...BASE, RB_CONFIG_WRAP_UP: value }), /RB_CONFIG_WRAP_UP/, value);
+  }
+});

@@ -223,6 +223,7 @@ export async function review(config: Config, chat: Chat, log: (message: string) 
     context.readers.push({ caller, reads: tracked.reads });
     return tracked;
   };
+  const pacing = config.wrapUpMs === null ? {} : { wrapUpMs: config.wrapUpMs };
   const seats = await Promise.allSettled(config.models.map(async (model, index) => {
     const seat = `s${index + 1}`;
     const focus = config.focuses[index] ?? null;
@@ -232,7 +233,7 @@ export async function review(config: Config, chat: Chat, log: (message: string) 
     const submission = await runAgent({
       chat, model, system: reviewerSystem(focus), prompt, workspace: seatWorkspace, submit: submitReview,
       deadline: reviewDeadline, maxTurns: config.maxTurns, log, caller,
-      ...afterFirstSubmission(config, seatWorkspace, changed),
+      ...afterFirstSubmission(config, seatWorkspace, changed), ...pacing,
     });
     const candidates = await normalizeCandidates(submission.findings, {
       seat, repoDir: config.repoDir, changed, headFile: (path) => workspace.headFile(path), log,
@@ -264,7 +265,7 @@ export async function review(config: Config, chat: Chat, log: (message: string) 
         chat, model, system: reviewerSystem(null),
         prompt: reviewerPrompt(pr, changed, diff, rules, documents, againBudget, section, decisions),
         workspace: seatWorkspace, submit: submitReview, deadline: reviewDeadline, maxTurns: config.maxTurns, log, caller,
-        ...afterFirstSubmission(config, seatWorkspace, changed),
+        ...afterFirstSubmission(config, seatWorkspace, changed), ...pacing,
       });
       const candidates = await normalizeCandidates(submission.findings, {
         seat, repoDir: config.repoDir, changed, headFile: (path) => workspace.headFile(path), log,
@@ -312,6 +313,7 @@ export async function review(config: Config, chat: Chat, log: (message: string) 
         chat, model: config.verifierModel, system: VERIFIER_SYSTEM,
         prompt: verifierPrompt(pr, changed, diff, survivors, decisions), workspace, submit: decisions ? submitVerdictsWithPrior : submitVerdicts,
         deadline: finishDeadline, maxTurns: config.maxTurns, log, caller: `verifier (${config.verifierModel})`,
+        ...pacing,
       });
       const before = survivors;
       const verdicts = new Map(parseVerdicts(submission.verdicts).map((verdict) => [verdict.id, verdict]));
@@ -351,6 +353,7 @@ export async function review(config: Config, chat: Chat, log: (message: string) 
     fit = await assessFit({
       chat, model: config.fitModel, pr, changed, diff, rules, documents, findings: ranked, prior, deadline: fitDeadline,
       maxTurns: config.maxTurns, log, workspace: track(`fit (${config.fitModel})`, new Workspace(config.repoDir, config.diffPath, config.base)),
+      ...pacing,
     });
   } else if (config.fitModel) {
     log("fit skipped: too little time is left");
