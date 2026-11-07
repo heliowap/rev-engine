@@ -10,7 +10,7 @@ import { readTools, type ToolDefinition, type Workspace } from "./tools.ts";
  * Time kept back at the end for the model to write its submission. Ordinary
  * turns may not run into it, so one slow call cannot use up the whole deadline.
  */
-const WRAP_UP_MS = 100_000;
+export const WRAP_UP_MS = 100_000;
 /** Conversation size, in characters, past which the model is told to submit. Bounds the cost of every later turn. */
 const MAX_CONTEXT_CHARS = 800_000;
 

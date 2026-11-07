@@ -73,11 +73,10 @@ An agent can read the whole list and decide what to fix. There is no assessment 
 | `mode` | `human` | The review to run when the comment names none, or when the workflow is started by hand. |
 | `agent-model` | `deepseek/deepseek-v4.1-flash-1017` | OpenRouter model the swarm of an agent review uses. |
 | `allow-forks` | `false` | Set to `true` to review pull requests from forks. |
-| `max-turns` | empty, which keeps the reviewer's `40` | Model turns allowed per review or verification pass. |
-| `second-look` | empty, which keeps `on` | What a reviewer does after its first submission: `on`, `sweep`, `sweep-low`, `small` or `off`. |
-| `verify` | empty, which keeps `lenient` | `lenient`, `strict` or `off`: how the verification pass treats rejected findings. |
-| `effort` | empty, the provider's default | Reasoning effort, for models that accept one. |
-| `wrap-up` | empty, which keeps `100` | Seconds each review, verification and fit pass keeps back at the end to write its submission. Lower it together with `time-budget`. |
+| `max-turns` | empty | Model turns allowed per review or verification pass. Empty keeps the reviewer's default (see [SETTINGS.md](SETTINGS.md)). |
+| `second-look` | empty | Human reviews only. What a reviewer does after its first submission: `on`, `sweep`, `sweep-low`, `small` or `off`. Empty keeps the reviewer's default (see [SETTINGS.md](SETTINGS.md)). |
+| `effort` | empty | Human reviews only. Reasoning effort, for models that accept one. Empty keeps the reviewer's default (see [SETTINGS.md](SETTINGS.md)). |
+| `wrap-up` | empty | Human reviews only. Seconds each review, verification and fit pass keeps back at the end to write its submission. Lower it together with `time-budget`. Empty keeps the reviewer's default (see [SETTINGS.md](SETTINGS.md)). |
 | `runtime` | `docker` | Where the review step runs: `docker` builds and runs the image; `node` runs the code with Node 24 on a prepared self-hosted runner. See [Self-hosted runner without Docker](#self-hosted-runner-without-docker). |
 
 ## Self-hosted runner without Docker
@@ -90,14 +89,18 @@ With `runtime: node`, the review runs on a self-hosted runner without Docker, as
    VERSION=24.x.y   # the release you chose
    curl -fsSLO "https://nodejs.org/dist/v$VERSION/node-v$VERSION-linux-x64.tar.xz"
    curl -fsSL "https://nodejs.org/dist/v$VERSION/SHASUMS256.txt" | grep " node-v$VERSION-linux-x64.tar.xz$" | sha256sum -c -
-   sudo tar -xJf "node-v$VERSION-linux-x64.tar.xz" -C /opt
+   sudo tar --no-same-owner -xJf "node-v$VERSION-linux-x64.tar.xz" -C /opt
    ```
+
+   `--no-same-owner` makes root own the extracted files. `provision.sh` checks that the Node directory is owned by root and not writable by others.
 
 2. From a checkout of this repository, run the provisioning script as root. It creates the `reviewer` user, the job directory, the sudo rule and the Node link:
 
    ```sh
    sudo action/node/provision.sh --node-dir "/opt/node-v$VERSION-linux-x64" --runner-user <runner user>
    ```
+
+   The host needs sudo 1.9.10 or later. The script refuses a Node directory that is not owned by root or is writable by others, and a runner home that others can read, write or enter. If it refuses the home, run `chmod o-rwx <runner home>` and run the script again.
 
 3. Remove the runner user from the `docker` group, then restart the runner services.
 
@@ -106,8 +109,8 @@ With `runtime: node`, the review runs on a self-hosted runner without Docker, as
 The node runtime gives these properties:
 
 - the `reviewer` user has no login shell and no home directory, and it cannot read the runner's home; check with `sudo -u reviewer ls <runner home>`, which must fail;
-- the model key arrives on the review command's stdin, never in its arguments or in sudo's environment;
-- the GitHub token stays with the collect and post steps, which hold no model key;
+- the model key arrives on the review command's stdin, and the reviewer gets it only in its environment, never in an argument list or in sudo's environment;
+- the GitHub token stays with the collect and post steps, which hold no model key; with `runtime: node` the collector runs alongside the diff step, and the review step waits for both;
 - sudo allows one command, the review wrapper, and only with a job directory argument.
 
 ## Security

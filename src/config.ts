@@ -1,5 +1,6 @@
 // Reads the agent contract's inputs and this reviewer's settings from the environment.
 import { dirname, join } from "node:path";
+import { WRAP_UP_MS } from "./agent.ts";
 import type { Severity } from "./findings.ts";
 import { FOCUS_NAMES } from "./prompts.ts";
 
@@ -168,7 +169,7 @@ export function loadConfig(env: Env): Config {
     maxFindings: integer(env, "RB_CONFIG_MAX_FINDINGS", DEFAULT_MAX_FINDINGS[mode], 1, 100),
     budgetMs: integer(env, "RB_CONFIG_TIME_BUDGET", 780, 60, 7200) * 1000,
     maxTurns: integer(env, "RB_CONFIG_MAX_TURNS", 40, 2, 200),
-    wrapUpMs: env.RB_CONFIG_WRAP_UP?.trim() ? integer(env, "RB_CONFIG_WRAP_UP", 100, 10, 600) * 1000 : null,
+    wrapUpMs: env.RB_CONFIG_WRAP_UP?.trim() ? integer(env, "RB_CONFIG_WRAP_UP", WRAP_UP_MS / 1000, 10, 600) * 1000 : null,
   };
 }
 
