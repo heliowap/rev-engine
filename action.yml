@@ -23,6 +23,9 @@ inputs:
   model:
     description: OpenRouter model that reviews and verifies.
     default: anthropic/claude-opus-5.5
+  model-base-url:
+    description: OpenAI-compatible chat completions endpoint the models are called through.
+    default: https://openrouter.ai/api/v1
   min-severity:
     description: The least severe findings that get a comment. One of high, medium or low. Less severe findings are listed in a collapsed section of the summary.
     default: medium
@@ -151,6 +154,7 @@ runs:
       shell: bash
       env:
         OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+        RB_MODEL_BASE_URL: ${{ inputs.model-base-url }}
         RB_NWO: ${{ github.repository }}
         RB_PR_NUMBER: ${{ steps.ask.outputs.number }}
         RB_BASE: ${{ steps.ask.outputs.base }}
@@ -175,7 +179,7 @@ runs:
           -v "$GITHUB_WORKSPACE/rev-engine-prime-checkout:/work/repo:ro" \
           -v "$RUNNER_TEMP/rev-engine-prime/pr:/work/pr:ro" \
           -v "$RUNNER_TEMP/rev-engine-prime/out:/work/out" \
-          -e OPENROUTER_API_KEY -e RB_NWO -e RB_PR_NUMBER -e RB_BASE -e RB_HEAD \
+          -e OPENROUTER_API_KEY -e RB_MODEL_BASE_URL -e RB_NWO -e RB_PR_NUMBER -e RB_BASE -e RB_HEAD \
           -e RB_CONFIG_MODEL -e RB_CONFIG_TIME_BUDGET -e RB_CONFIG_FIT -e RB_DETAILS_OUT=/work/out/details.json \
           -e RB_REPO=/work/repo -e RB_DIFF=/work/pr/diff.patch -e RB_PR_JSON=/work/pr/pr.json -e RB_PRIOR_JSON=/work/pr/prior.json \
           -e RB_OUT=/work/out/findings.json -e RB_ATTEMPT=1 \

@@ -64,6 +64,7 @@ An agent can read the whole list and decide what to fix. There is no assessment 
 | Input | Default | Meaning |
 |---|---|---|
 | `model` | `anthropic/claude-opus-5.5` | OpenRouter model that reviews and verifies. |
+| `model-base-url` | `https://openrouter.ai/api/v1` | OpenAI-compatible endpoint the models are called through. The `openrouter-api-key` input holds that endpoint's key. |
 | `min-severity` | `medium` | The least severe findings that get a comment. One of `high`, `medium` or `low`. |
 | `max-findings` | `10` | Cap on findings that get a comment. The rest join the collapsed section. |
 | `fit` | `on` | Say whether the change belongs in the project. |
