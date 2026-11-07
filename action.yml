@@ -99,30 +99,31 @@ runs:
           echo "head=$(jq -r .head.sha "$RUNNER_TEMP/rev-engine-prime/pull.json")"
         } >> "$GITHUB_OUTPUT"
 
+    # The reviewer needs only the head tree and the base commit, so the checkout is shallow.
     # The token is not kept in the checkout, because the model can read files there.
     - name: Check out the pull request
       if: steps.ask.outputs.run == 'true'
       uses: actions/checkout@v4
       with:
         ref: ${{ steps.ask.outputs.head }}
-        fetch-depth: 0
+        fetch-depth: 1
         path: rev-engine-prime-checkout
         persist-credentials: false
         token: ${{ inputs.github-token }}
 
+    # The compare API gives the diff without history; action/diff.sh falls back to git.
     - name: Write the diff
       if: steps.ask.outputs.run == 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
         BASE: ${{ steps.ask.outputs.base }}
         HEAD: ${{ steps.ask.outputs.head }}
-      run: |
-        set -euo pipefail
-        repo="$GITHUB_WORKSPACE/rev-engine-prime-checkout"
-        auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
-        git -C "$repo" -c "http.extraheader=AUTHORIZATION: basic $auth" fetch --quiet --no-tags origin "$BASE"
-        git -C "$repo" diff "$BASE...$HEAD" > "$RUNNER_TEMP/rev-engine-prime/pr/diff.patch"
+        PULL_JSON: ${{ runner.temp }}/rev-engine-prime/pull.json
+        CHECKOUT: ${{ github.workspace }}/rev-engine-prime-checkout
+        OUT: ${{ runner.temp }}/rev-engine-prime/pr/diff.patch
+      run: bash "$GITHUB_ACTION_PATH/action/diff.sh"
 
     - name: Build the reviewer
       if: steps.ask.outputs.run == 'true'
