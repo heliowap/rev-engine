@@ -55,7 +55,7 @@ The result is one comment with no comments on lines:
 - Each finding's severity, how many verifiers confirmed it, its location and the full explanation.
 - The same one line of merge advice as a human review.
 
-An agent can read the whole list and decide what to fix. There is no assessment of whether the change belongs in the project. The `model`, `min-severity`, `max-findings`, `fit`, `time-budget`, `effort`, `second-look` and `wrap-up` inputs do not apply to an agent review. Its counterparts are `agent-model`, which picks the swarm's model, and `swarm-effort`, which sets the reasoning effort of the swarm's agents.
+An agent can read the whole list and decide what to fix. There is no assessment of whether the change belongs in the project. The `model`, `min-severity`, `max-findings`, `fit`, `effort`, `second-look` and `wrap-up` inputs do not apply to an agent review. Its counterparts are `agent-model`, which picks the swarm's model, and `swarm-effort`, which sets the reasoning effort of the swarm's agents. `time-budget` only caps the swarm's own pace of 60 seconds per agent, 90 at most.
 
 `/review human`, or `/review` alone, runs the default review.
 
