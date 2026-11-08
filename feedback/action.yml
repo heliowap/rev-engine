@@ -1,0 +1,129 @@
+name: Rev Engine Prime review feedback
+description: Records a hosted receipt for an accepted review request, and keeps it in step with the review run. Hosted only. It holds no model key.
+
+inputs:
+  phase:
+    description: accept writes the receipt of an accepted request. sync brings the receipt of a review run up to date.
+    required: true
+  github-token:
+    description: Token that reads and writes the receipt. Use the default Actions token: a token of another account fails the receipt author check. The review's posting token is never used here.
+    default: ${{ github.token }}
+  pr-number:
+    description: accept only. Pull request to review, as the root action reads it.
+    default: ""
+  command:
+    description: accept only. The command text, as the root action reads it.
+    default: /review
+  mode:
+    description: accept only. The review to run when the comment does not say, as the root action reads it.
+    default: human
+  allow-forks:
+    description: accept only. Set to "true" to accept pull requests from forks, as the root action reads it.
+    default: "false"
+  runtime:
+    description: accept only. Must match the review job's runtime, so the gate decides the same way for both.
+    default: docker
+  run-id:
+    description: sync only. The review run to sync. accept uses the run that calls it.
+    default: ""
+  review-workflow:
+    description: sync only. Path of the review workflow file the run must come from.
+    default: .github/workflows/review.yml
+  review-job:
+    description: sync only. Display name of the review job whose state the receipt shows.
+    default: Review pull request
+  feedback-author:
+    description: The receipt author. Fixed to github-actions[bot], the only account that writes receipts. Any other value fails before any GitHub call.
+    default: github-actions[bot]
+  review-author:
+    description: Login of the account that posts the review. Empty means feedback-author.
+    default: ""
+
+outputs:
+  accepted:
+    description: true only after the receipt exists on GitHub.
+    value: ${{ steps.accept.outputs.accepted || 'false' }}
+  number:
+    description: The pull request of an accepted request.
+    value: ${{ steps.ask.outputs.number }}
+  mode:
+    description: The review mode of an accepted request, agent or human.
+    value: ${{ steps.ask.outputs.mode }}
+  comment-id:
+    description: The receipt comment of an accepted request.
+    value: ${{ steps.accept.outputs.comment-id }}
+  run-id:
+    description: The source run of an accepted request.
+    value: ${{ steps.accept.outputs.run-id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check the phase
+      if: inputs.phase != 'accept' && inputs.phase != 'sync'
+      shell: bash
+      run: |
+        echo "::error::phase must be accept or sync"
+        exit 1
+
+    # The same gate as the root action, in the same script, so the two decide alike.
+    - name: Check who asked
+      id: ask
+      if: inputs.phase == 'accept'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        EVENT_NAME: ${{ github.event_name }}
+        ACTOR: ${{ github.event.comment.user.login || github.actor }}
+        COMMENT: ${{ github.event.comment.body }}
+        COMMENT_ON_PR: ${{ github.event.issue.pull_request.url }}
+        EVENT_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+        INPUT_NUMBER: ${{ inputs.pr-number }}
+        COMMAND: ${{ inputs.command }}
+        MODE: ${{ inputs.mode }}
+        ALLOW_FORKS: ${{ inputs.allow-forks }}
+        RUNTIME: ${{ inputs.runtime }}
+      run: bash "$GITHUB_ACTION_PATH/../action/ask.sh"
+
+    - name: Set up Node
+      if: inputs.phase == 'sync' || steps.ask.outputs.run == 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: 24
+
+    # The receipt is written here, before the review job is allowed to run. Outputs are written only
+    # after the receipt exists.
+    - name: Record the request
+      id: accept
+      if: inputs.phase == 'accept' && steps.ask.outputs.run == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITHUB_API_URL: ${{ github.api_url }}
+        GITHUB_SERVER_URL: ${{ github.server_url }}
+        REPO: ${{ github.repository }}
+        SOURCE_RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        PR_NUMBER: ${{ steps.ask.outputs.number }}
+        MODE: ${{ steps.ask.outputs.mode }}
+        COMMENT_ID: ${{ github.event.comment.id }}
+        FEEDBACK_AUTHOR: ${{ inputs.feedback-author }}
+        REVIEW_AUTHOR: ${{ inputs.review-author || inputs.feedback-author }}
+      run: node "$GITHUB_ACTION_PATH/../action/feedback.ts" accept
+
+    # Brings the receipt of one review run up to date with GitHub. It never creates a receipt.
+    - name: Sync the receipt
+      if: inputs.phase == 'sync'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITHUB_API_URL: ${{ github.api_url }}
+        GITHUB_SERVER_URL: ${{ github.server_url }}
+        REPO: ${{ github.repository }}
+        SOURCE_RUN_ID: ${{ inputs.run-id }}
+        REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
+        REVIEW_JOB: ${{ inputs.review-job }}
+        FEEDBACK_AUTHOR: ${{ inputs.feedback-author }}
+        REVIEW_AUTHOR: ${{ inputs.review-author || inputs.feedback-author }}
+      run: node "$GITHUB_ACTION_PATH/../action/feedback.ts" sync

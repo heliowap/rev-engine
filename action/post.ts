@@ -2,6 +2,8 @@
 import { readFile } from "node:fs/promises";
 import { buildAgentReview, buildReview, MARKER, parseHunks, withoutLineComments, type ExistingComment, type Finding, type Fit, type ReviewInput, type ReviewParts, type Severity } from "./comments.ts";
 import { isDecisionReply } from "./decisions.ts";
+import { httpsUrl, isPositiveSafe, reviewMarker } from "./feedback-state.ts";
+import { GitHubApi, resolveUserId } from "./feedback.ts";
 
 const log = (message: string): void => console.error(`post: ${message}`);
 
@@ -92,8 +94,41 @@ async function settledComments(): Promise<Set<number>> {
   return settled;
 }
 
+// Feedback state for this run: the marker every review of the run carries, and the numeric ID of the
+// configured review author. Both are set only when the run is a feedback run.
+let feedbackMarker: string | null = null;
+let reviewAuthorId: number | null = null;
+
+async function setUpFeedback(): Promise<void> {
+  const run = process.env.FEEDBACK_RUN_ID?.trim() || "";
+  if (!run) return;
+  const attempt = process.env.FEEDBACK_RUN_ATTEMPT?.trim() || "";
+  if (!/^[1-9][0-9]*$/.test(run) || !/^[1-9][0-9]*$/.test(attempt)) throw new Error("the feedback run and attempt must be positive whole numbers");
+  // The author is resolved before anything is posted, so a configured author that cannot be found blocks the review.
+  reviewAuthorId = await resolveUserId(new GitHubApi(api, token), required("REVIEW_AUTHOR"));
+  feedbackMarker = reviewMarker(Number(run), Number(attempt));
+}
+
+function withFeedbackMarker(body: string): string {
+  return feedbackMarker === null ? body : `${body}\n\n${feedbackMarker}`;
+}
+
 async function submit(parts: ReviewParts): Promise<Response> {
-  return github("POST", `/pulls/${number}/reviews`, { commit_id: head, event: "COMMENT", body: parts.body, comments: parts.comments });
+  return github("POST", `/pulls/${number}/reviews`, { commit_id: head, event: "COMMENT", body: withFeedbackMarker(parts.body), comments: parts.comments });
+}
+
+/**
+ * The publication of a posted review: its ID and URL, read from GitHub's answer. A feedback run
+ * also checks that the review was written by the configured author. Anything else is not confirmed.
+ */
+async function publication(response: Response): Promise<{ id: number; url: string }> {
+  const review = await response.json().catch(() => null) as { id?: unknown; html_url?: unknown; user?: { id?: unknown } } | null;
+  const url = httpsUrl(review?.html_url);
+  if (review === null || !isPositiveSafe(review.id) || url === null) throw new Error("GitHub's answer has no valid review identity, so the review is not confirmed as published");
+  if (reviewAuthorId !== null && review.user?.id !== reviewAuthorId) {
+    throw new Error(`review ${review.id} at ${url} was posted by an unexpected author, so it is not confirmed as published and was not posted again`);
+  }
+  return { id: review.id, url };
 }
 
 /**
@@ -106,7 +141,8 @@ async function linkComments(input: ReviewInput, parts: ReviewParts, review: numb
     if (!response.ok) throw new Error(`listing the review's comments failed with status ${response.status}`);
     const posted = await response.json() as Array<{ path: string; body: string; html_url: string }>;
     const links = parts.comments.map((comment) => posted.find((other) => other.path === comment.path && other.body.trim() === comment.body.trim())?.html_url);
-    const update = await github("PUT", `/pulls/${number}/reviews/${review}`, { body: buildReview(input, links).body });
+    // The summary is rewritten whole, so the feedback marker goes back in with it.
+    const update = await github("PUT", `/pulls/${number}/reviews/${review}`, { body: withFeedbackMarker(buildReview(input, links).body) });
     if (!update.ok) throw new Error(`updating the summary failed with status ${update.status}`);
   } catch (error) {
     log(`the summary has no links to its comments: ${error instanceof Error ? error.message : String(error)}`);
@@ -123,6 +159,7 @@ async function optionalJson<T>(path: string | undefined): Promise<T | null> {
 }
 
 try {
+  await setUpFeedback();
   const minSeverity = (process.env.MIN_SEVERITY?.trim() || "medium") as Severity;
   if (!["high", "medium", "low"].includes(minSeverity)) throw new Error("min-severity must be high, medium or low");
   const maxComments = Number(process.env.MAX_COMMENTS?.trim() || "10");
@@ -134,6 +171,9 @@ try {
     // An agent review is one summary with every finding and no line comments.
     const response = await submit(buildAgentReview({ findings: output.findings, head, model, decided }));
     if (!response.ok) throw new Error(`posting the review failed with status ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    const published = await publication(response);
+    // stdout carries only this publication, for the workflow to read; logs stay on stderr.
+    process.stdout.write(`${JSON.stringify(published)}\n`);
     log(`posted an agent review with ${output.findings.length} finding(s) on ${nwo}#${number}`);
     process.exit(0);
   }
@@ -154,7 +194,9 @@ try {
     inline = false;
   }
   if (!response.ok) throw new Error(`posting the review failed with status ${response.status}: ${(await response.text()).slice(0, 500)}`);
-  if (inline) await linkComments(input, parts, (await response.json() as { id: number }).id);
+  const published = await publication(response);
+  if (inline) await linkComments(input, parts, published.id);
+  process.stdout.write(`${JSON.stringify(published)}\n`);
   log(`posted a review with ${inline ? parts.comments.length : 0} line comment(s) on ${nwo}#${number}`);
 } catch (error) {
   log(error instanceof Error ? error.message : String(error));

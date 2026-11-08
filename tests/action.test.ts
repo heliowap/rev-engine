@@ -803,11 +803,174 @@ test("node mode writes the diff and runs the collector beside it, and the review
   assert.match(stepNamed("Write the diff"), /\n      if: .*inputs\.runtime == 'docker'/);
 });
 
-test("the runtime input defaults to docker, and the ask step rejects any other value", () => {
+test("the runtime input defaults to docker, and the ask step passes it to the shared gate", () => {
   assert.match(inputNamed("runtime"), /^    default: docker$/m);
   const ask = stepNamed("Check who asked");
   assert.match(ask, /RUNTIME: \$\{\{ inputs\.runtime \}\}/);
-  assert.match(ask, /docker\|node\)/);
+  assert.match(ask, /bash "\$GITHUB_ACTION_PATH\/action\/ask\.sh"/);
+});
+
+// ask.sh is the shared gate for the root action and the hosted feedback action. Its tests run the
+// script itself with a gh shim: the collaborator permission, and the pull request JSON.
+function askSandbox(options: { permission?: string; permissionFails?: boolean; pull?: Record<string, unknown> } = {}) {
+  const root = sandbox();
+  const pull = {
+    base: { sha: "a".repeat(40) },
+    head: { sha: "b".repeat(40), repo: { full_name: "owner/repo" } },
+    ...options.pull,
+  };
+  writeFileSync(join(root, "pull.json"), JSON.stringify(pull));
+  writeFileSync(join(root, "permission"), options.permission ?? "write");
+  shim(root, "gh", [
+    `case "$*" in`,
+    `  *collaborators*) ${options.permissionFails ? "exit 1" : `cat '${join(root, "permission")}'`} ;;`,
+    `  *pulls*) cat '${join(root, "pull.json")}' ;;`,
+    `  *) exit 2 ;;`,
+    `esac`,
+  ].join("\n"));
+  return root;
+}
+
+function askRun(root: string, env: Record<string, string>) {
+  const output = join(root, "github-output");
+  writeFileSync(output, "");
+  const result = bash("ask.sh", [], shimEnv(root, {
+    GH_TOKEN: "token-under-test",
+    REPO: "owner/repo",
+    RUNNER_TEMP: join(root, "tmp"),
+    GITHUB_OUTPUT: output,
+    EVENT_NAME: "issue_comment",
+    ACTOR: "maintainer",
+    COMMENT: "/review",
+    COMMENT_ON_PR: "https://api.github.com/repos/owner/repo/pulls/7",
+    EVENT_NUMBER: "7",
+    INPUT_NUMBER: "",
+    COMMAND: "/review",
+    MODE: "human",
+    ALLOW_FORKS: "false",
+    RUNTIME: "docker",
+    ...env,
+  }));
+  const outputs = Object.fromEntries(readFileSync(output, "utf8").trimEnd().split("\n").filter(Boolean).map((line) => {
+    const at = line.indexOf("=");
+    return [line.slice(0, at), line.slice(at + 1)];
+  }));
+  return { result, outputs };
+}
+
+test("ask.sh accepts an authorized comment on a pull request, and writes the outputs the workflow reads", () => {
+  const root = askSandbox();
+  const { result, outputs } = askRun(root, {});
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(outputs.run, "true");
+  assert.equal(outputs.mode, "human");
+  assert.equal(outputs.number, "7");
+  assert.equal(outputs.base, "a".repeat(40));
+  assert.equal(outputs.head, "b".repeat(40));
+  assert.ok(existsSync(join(root, "tmp", "rev-engine-prime", "pr", "pr.json")));
+});
+
+test("ask.sh takes the mode from the first word after the command, in any case, and keeps the default otherwise", () => {
+  const root = askSandbox();
+  const cases: Array<[string, string, string]> = [
+    ["/review agent", "human", "agent"],
+    ["/review AGENT", "human", "agent"],
+    ["/review Human", "agent", "human"],
+    ["/review agent please look at the tests", "human", "agent"],
+    ["/review robot", "agent", "agent"],
+    ["/review robot", "human", "human"],
+    ["/review\tagent", "human", "agent"],
+    ["/review   agent", "human", "agent"],
+    ["/review agent   ", "human", "agent"],
+    ["/review agent\r", "human", "agent"],
+    ["/review\r\nagent", "human", "human"],
+    ["/review\nagent", "human", "human"],
+    ["/review agent\nmore text on a later line", "human", "agent"],
+    ["/review", "agent", "agent"],
+  ];
+  for (const [comment, mode, expected] of cases) {
+    const { result, outputs } = askRun(root, { COMMENT: comment, MODE: mode });
+    assert.equal(result.status, 0, `${JSON.stringify(comment)}: ${result.stderr}`);
+    assert.equal(outputs.run, "true", JSON.stringify(comment));
+    assert.equal(outputs.mode, expected, JSON.stringify(comment));
+  }
+});
+
+test("ask.sh does not start a review for a noncommand or a prefix lookalike", () => {
+  const root = askSandbox();
+  for (const comment of ["/reviewer", "please /review", "/review-now", "/reviews agent", " /review", ""]) {
+    const { result, outputs } = askRun(root, { COMMENT: comment });
+    assert.equal(result.status, 0, JSON.stringify(comment));
+    assert.equal(outputs.run, "false", JSON.stringify(comment));
+    assert.match(result.stdout, /::notice::No review: the comment is not \/review/, JSON.stringify(comment));
+  }
+});
+
+test("ask.sh does not start a review for a comment on an issue rather than a pull request", () => {
+  const root = askSandbox();
+  const { result, outputs } = askRun(root, { COMMENT_ON_PR: "" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(outputs.run, "false");
+});
+
+test("ask.sh starts only for an admin or write collaborator, and refuses when the permission lookup fails", () => {
+  for (const permission of ["admin", "write"]) {
+    const { result, outputs } = askRun(askSandbox({ permission }), {});
+    assert.equal(outputs.run, "true", permission);
+    assert.equal(result.status, 0, result.stderr);
+  }
+  for (const permission of ["read", "none", ""]) {
+    const { result, outputs } = askRun(askSandbox({ permission }), {});
+    assert.equal(outputs.run, "false", permission);
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const failed = askRun(askSandbox({ permissionFails: true }), {});
+  assert.equal(failed.outputs.run, "false");
+  assert.equal(failed.result.status, 0, failed.result.stderr);
+});
+
+test("ask.sh starts a review by workflow dispatch from the PR number and the configured mode", () => {
+  const root = askSandbox();
+  const { result, outputs } = askRun(root, { EVENT_NAME: "workflow_dispatch", COMMENT: "", COMMENT_ON_PR: "", INPUT_NUMBER: "7", MODE: "agent" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(outputs.run, "true");
+  assert.equal(outputs.number, "7");
+  assert.equal(outputs.mode, "agent");
+});
+
+test("ask.sh refuses a dispatch without a usable PR number, an unknown mode or runtime, and says why", () => {
+  const root = askSandbox();
+  const noNumber = askRun(root, { EVENT_NAME: "workflow_dispatch", COMMENT: "", COMMENT_ON_PR: "", INPUT_NUMBER: "", EVENT_NUMBER: "" });
+  assert.equal(noNumber.result.status, 1);
+  assert.match(noNumber.result.stdout + noNumber.result.stderr, /::error::No pull request number/);
+  const badNumber = askRun(root, { EVENT_NAME: "workflow_dispatch", COMMENT: "", COMMENT_ON_PR: "", INPUT_NUMBER: "7x" });
+  assert.equal(badNumber.result.status, 1);
+  const badMode = askRun(root, { EVENT_NAME: "workflow_dispatch", COMMENT: "", COMMENT_ON_PR: "", INPUT_NUMBER: "7", MODE: "robot" });
+  assert.equal(badMode.result.status, 1);
+  assert.match(badMode.result.stdout + badMode.result.stderr, /::error::mode must be agent or human/);
+  const badRuntime = askRun(root, { RUNTIME: "podman" });
+  assert.equal(badRuntime.result.status, 1);
+  assert.match(badRuntime.result.stdout + badRuntime.result.stderr, /::error::runtime must be docker or node/);
+});
+
+test("ask.sh refuses a fork pull request unless allow-forks is true", () => {
+  const fork = askSandbox({ pull: { head: { sha: "b".repeat(40), repo: { full_name: "someone/fork" } }, base: { sha: "a".repeat(40) } } });
+  const refused = askRun(fork, {});
+  assert.equal(refused.outputs.run, "false");
+  assert.equal(refused.result.status, 0, refused.result.stderr);
+
+  const allowed = askRun(fork, { ALLOW_FORKS: "true" });
+  assert.equal(allowed.outputs.run, "true");
+  assert.equal(allowed.result.status, 0, allowed.result.stderr);
+});
+
+test("ask.sh never prints the token it is given", () => {
+  const root = askSandbox();
+  const { result } = askRun(root, { GH_TOKEN: "token-under-test-value" });
+  assert.ok(!`${result.stdout}${result.stderr}`.includes("token-under-test-value"));
 });
 
 test("each docker step runs only for runtime docker, and each node step only for runtime node", () => {
@@ -820,4 +983,110 @@ test("each docker step runs only for runtime docker, and each node step only for
       assert.match(step, /\n      if: .*inputs\.runtime == 'docker'/, nameOf(step));
     }
   }
+});
+
+// --- Closed-loop feedback in the root action. The receipt belongs to the hosted action, so the root
+// only asks for a status sync, with the feedback token, and reads back the URL of its own publication.
+
+function outputNamed(name: string): string {
+  const outputs = actionYml.split("\noutputs:\n")[1]!.split("\nruns:")[0]!;
+  const block = outputs.split(/\n(?=  [a-z-]+:\n)/).find((chunk) => chunk.startsWith(`  ${name}:\n`));
+  assert.ok(block, `no output named ${name}`);
+  return block;
+}
+
+// The run: block of a step, with its eight-space indentation removed, as bash would read it.
+function runBlock(step: string): string {
+  const lines = step.split("\n");
+  const start = lines.findIndex((line) => line === "      run: |");
+  assert.ok(start >= 0, `no multi-line run block in ${nameOf(step)}`);
+  const body: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line !== "" && !line.startsWith("        ")) break;
+    body.push(line.slice(8));
+  }
+  return body.join("\n");
+}
+
+test("the root action has feedback inputs that default off and keep the posting token separate", () => {
+  assert.match(inputNamed("feedback"), /^    default: "false"$/m);
+  assert.match(inputNamed("feedback-workflow"), /^    default: review-status\.yml$/m);
+  assert.match(inputNamed("feedback-token"), /^    default: \$\{\{ github\.token \}\}$/m);
+  assert.match(inputNamed("review-author"), /^    default: github-actions\[bot\]$/m);
+});
+
+test("the root action publishes the review URL of its own post step, and nothing else", () => {
+  const output = outputNamed("review-url");
+  assert.match(output, /steps\.post\.outputs\.review-url/);
+  assert.match(output, /steps\.post-node\.outputs\.review-url/);
+});
+
+test("both post steps send the feedback run and attempt, and keep the publication on the host", () => {
+  for (const name of ["Post the review", "Post the review (node)"]) {
+    const step = stepNamed(name);
+    assert.match(step, /^        FEEDBACK_RUN_ID: \$\{\{ inputs\.feedback == 'true' && github\.run_id \|\| '' \}\}$/m, name);
+    assert.match(step, /^        FEEDBACK_RUN_ATTEMPT: \$\{\{ inputs\.feedback == 'true' && github\.run_attempt \|\| '' \}\}$/m, name);
+    assert.match(step, /^        REVIEW_AUTHOR: \$\{\{ inputs\.review-author \}\}$/m, name);
+    assert.match(step, /publication="\$RUNNER_TEMP\/rev-engine-prime\/publication\.json"/, name);
+    assert.match(step, /> "\$publication"/, name);
+    assert.match(step, /review-url=/, name);
+    assert.doesNotMatch(step, /-e GITHUB_OUTPUT|GITHUB_OUTPUT\b.*-v/, name);
+  }
+  assert.match(stepNamed("Post the review"), /\n      id: post\n/);
+  assert.match(stepNamed("Post the review (node)"), /\n      id: post-node\n/);
+});
+
+test("the review step never gets the feedback token or the posting token's dispatch rights", () => {
+  for (const step of stepsStartingWith("Review")) {
+    assert.doesNotMatch(step, /feedback-token/, nameOf(step));
+  }
+});
+
+test("the announce step asks for a status sync with the feedback token only, after the gate and before the checkout", () => {
+  const announce = stepNamed("Announce execution");
+  assert.match(announce, /if: steps\.ask\.outputs\.run == 'true' && inputs\.feedback == 'true'/);
+  assert.match(announce, /^        GH_TOKEN: \$\{\{ inputs\.feedback-token \}\}$/m);
+  assert.doesNotMatch(announce, /inputs\.github-token|openrouter-api-key|GITHUB_TOKEN/);
+  const order = allSteps().map(nameOf);
+  assert.ok(order.indexOf("Check who asked") < order.indexOf("Announce execution"));
+  assert.ok(order.indexOf("Announce execution") < order.indexOf("Check out the pull request"));
+});
+
+// The announce step's shell runs under bash with a gh shim, so its argument list, body and
+// failure handling are executed rather than read.
+function announce(root: string, env: Record<string, string>) {
+  const script = join(root, "announce.sh");
+  writeFileSync(script, runBlock(stepNamed("Announce execution")));
+  return spawnSync("bash", [script], { encoding: "utf8", env: shimEnv(root, env) });
+}
+
+test("the announce step dispatches the status workflow with the source run ID, through the feedback token", () => {
+  const root = sandbox();
+  const log = join(root, "gh-log");
+  shim(root, "gh", `{ printf 'argv:'; printf ' %s' "$@"; printf '\\n'; cat; printf '\\n'; printf 'token:%s\\n' "$GH_TOKEN"; } >> '${log}'`);
+
+  const result = announce(root, {
+    GH_TOKEN: "feedback-token-value",
+    REPO: "owner/repo",
+    RUN_ID: "123",
+    WORKFLOW: "review-status.yml",
+    REF: "main",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const recorded = readFileSync(log, "utf8");
+  assert.match(recorded, /argv: api --method POST repos\/owner\/repo\/actions\/workflows\/review-status\.yml\/dispatches --input -/);
+  assert.ok(recorded.includes('{"ref":"main","inputs":{"run-id":"123"}}'), recorded);
+  assert.ok(recorded.includes("token:feedback-token-value"));
+  assert.match(result.stdout + result.stderr, /Requested the feedback sync for run 123/);
+});
+
+test("a failed dispatch warns and exits 0, and claims no started review", () => {
+  const root = sandbox();
+  shim(root, "gh", "exit 1");
+  const result = announce(root, { REPO: "owner/repo", RUN_ID: "123", WORKFLOW: "review-status.yml", REF: "main", GH_TOKEN: "x" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout + result.stderr, /::warning::/);
+  assert.doesNotMatch(result.stdout + result.stderr, /started/i);
 });

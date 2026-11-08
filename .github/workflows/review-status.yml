@@ -1,0 +1,36 @@
+# Keeps the receipt of a review request in step with its review run. It runs on the default branch,
+# next to review.yml, when a Review run starts or completes, and when someone starts it with a run ID.
+# It checks out nothing from the run and reads no artifact. Its concurrency group is the same as the
+# group the accept job uses for the same run.
+name: Review feedback
+on:
+  workflow_run:
+    workflows: [Review]
+    types: [in_progress, completed]
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: ID of the Review run to sync
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  issues: write
+jobs:
+  sync:
+    name: Sync the review receipt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: rev-engine-feedback-${{ github.repository_id }}-${{ github.event.workflow_run.id || inputs.run-id }}
+      cancel-in-progress: false
+    steps:
+      - uses: heliowap/rev-engine/feedback@main
+        with:
+          phase: sync
+          run-id: ${{ github.event.workflow_run.id || inputs.run-id }}
+          review-workflow: .github/workflows/review.yml
+          review-job: Review pull request
+          review-author: ${{ vars.REV_ENGINE_REVIEW_AUTHOR || 'github-actions[bot]' }}

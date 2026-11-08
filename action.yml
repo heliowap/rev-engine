@@ -59,6 +59,23 @@ inputs:
   runtime:
     description: Where the review step runs. docker builds and runs the image. node runs the code with Node 24 on a self-hosted runner prepared with action/node/provision.sh, with the review step as a separate user that holds only the model key.
     default: docker
+  feedback:
+    description: Set to "true" when the hosted feedback action records a receipt for each accepted request. This run then asks the status workflow to sync that receipt. See docs/INSTALL.md.
+    default: "false"
+  feedback-workflow:
+    description: File name of the status workflow, on the default branch, that the feedback sync runs in.
+    default: review-status.yml
+  feedback-token:
+    description: Token used only to start the status workflow. It never posts a review, and the model step never gets it.
+    default: ${{ github.token }}
+  review-author:
+    description: Login of the account that posts the review. With feedback on, a review by any other account is not confirmed as published. Use the same value as the feedback workflows.
+    default: github-actions[bot]
+
+outputs:
+  review-url:
+    description: The URL of the review this run published. Empty when no review was posted.
+    value: ${{ steps.post.outputs.review-url || steps.post-node.outputs.review-url }}
 
 runs:
   using: composite
@@ -81,43 +98,29 @@ runs:
         MODE: ${{ inputs.mode }}
         ALLOW_FORKS: ${{ inputs.allow-forks }}
         RUNTIME: ${{ inputs.runtime }}
+      # The shared gate in action/ask.sh, also used by the hosted feedback action.
+      run: bash "$GITHUB_ACTION_PATH/action/ask.sh"
+
+    # With feedback on, asks the status workflow to sync this run's receipt. It holds the feedback token
+    # and no other secret. A failure is only a warning: the review still runs, and the status workflow's
+    # completion watcher and its manual run bring the receipt up to date.
+    - name: Announce execution
+      if: steps.ask.outputs.run == 'true' && inputs.feedback == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.feedback-token }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+        WORKFLOW: ${{ inputs.feedback-workflow }}
+        REF: ${{ github.event.repository.default_branch }}
       run: |
         set -euo pipefail
-        skip() { echo "::notice::No review: $1"; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0; }
-
-        number="${INPUT_NUMBER:-$EVENT_NUMBER}"
-        if [ "$EVENT_NAME" = issue_comment ]; then
-          [ -n "$COMMENT_ON_PR" ] || skip "the comment is not on a pull request"
-          # Only the first line counts, without the carriage return and trailing spaces that
-          # some browsers and the mobile app add.
-          first=$(printf '%s\n' "$COMMENT" | head -n 1 | tr -d '\r' | sed 's/[[:space:]]*$//')
-          case "$first" in "$COMMAND"|"$COMMAND "*|"$COMMAND	"*) ;; *) skip "the comment is not $COMMAND" ;; esac
-          number="$EVENT_NUMBER"
-          # The first word after the command picks the review; any other text keeps the default.
-          word=$(printf '%s' "${first#"$COMMAND"}" | awk '{print tolower($1)}')
-          case "$word" in agent|human) MODE="$word" ;; esac
+        if jq -cn --arg ref "$REF" --arg run "$RUN_ID" '{ref: $ref, inputs: {"run-id": $run}}' \
+          | gh api --method POST "repos/$REPO/actions/workflows/$WORKFLOW/dispatches" --input - > /dev/null 2>&1; then
+          echo "Requested the feedback sync for run $RUN_ID."
+        else
+          echo "::warning::Could not request the feedback sync for run $RUN_ID. The review continues. Run the Review feedback workflow by hand with this run ID to bring the receipt up to date."
         fi
-        case "$MODE" in agent|human) ;; *) echo "::error::mode must be agent or human"; exit 1 ;; esac
-        case "$RUNTIME" in docker|node) ;; *) echo "::error::runtime must be docker or node"; exit 1 ;; esac
-        case "$number" in ''|*[!0-9]*) echo "::error::No pull request number. Set pr-number."; exit 1 ;; esac
-
-        # Only people who can push to the repository may start a review, because each one costs money.
-        permission=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission 2>/dev/null || echo none)
-        case "$permission" in admin|write) ;; *) skip "$ACTOR does not have write access to $REPO" ;; esac
-
-        mkdir -p "$RUNNER_TEMP/rev-engine-prime/pr" "$RUNNER_TEMP/rev-engine-prime/out"
-        gh api "repos/$REPO/pulls/$number" > "$RUNNER_TEMP/rev-engine-prime/pull.json"
-        jq '{title, body}' "$RUNNER_TEMP/rev-engine-prime/pull.json" > "$RUNNER_TEMP/rev-engine-prime/pr/pr.json"
-        if [ "$(jq -r '.head.repo.full_name // ""' "$RUNNER_TEMP/rev-engine-prime/pull.json")" != "$REPO" ] && [ "$ALLOW_FORKS" != true ]; then
-          skip "pull request $number comes from a fork and allow-forks is not set"
-        fi
-        {
-          echo "run=true"
-          echo "mode=$MODE"
-          echo "number=$number"
-          echo "base=$(jq -r .base.sha "$RUNNER_TEMP/rev-engine-prime/pull.json")"
-          echo "head=$(jq -r .head.sha "$RUNNER_TEMP/rev-engine-prime/pull.json")"
-        } >> "$GITHUB_OUTPUT"
 
     # The reviewer needs only the head tree and the base commit, so the checkout is shallow.
     # The token is not kept in the checkout, because the model can read files there.
@@ -261,6 +264,7 @@ runs:
     # its own. The node runtime runs it with the provisioned Node, below.
     # It gets the GitHub token and no model key; the review above gets the model key and no GitHub token.
     - name: Post the review
+      id: post
       if: steps.ask.outputs.run == 'true' && inputs.runtime == 'docker'
       shell: bash
       env:
@@ -274,18 +278,26 @@ runs:
         REVIEW_MODE: ${{ steps.ask.outputs.mode }}
         MIN_SEVERITY: ${{ inputs.min-severity }}
         MAX_COMMENTS: ${{ inputs.max-findings }}
+        FEEDBACK_RUN_ID: ${{ inputs.feedback == 'true' && github.run_id || '' }}
+        FEEDBACK_RUN_ATTEMPT: ${{ inputs.feedback == 'true' && github.run_attempt || '' }}
+        REVIEW_AUTHOR: ${{ inputs.review-author }}
       run: |
         set -euo pipefail
+        # The publication goes to a file on the host, so the container never gets GITHUB_OUTPUT.
+        publication="$RUNNER_TEMP/rev-engine-prime/publication.json"
         docker run --rm --entrypoint node \
           -v "$GITHUB_ACTION_PATH/action:/agent/action:ro" \
           -v "$RUNNER_TEMP/rev-engine-prime:/work:ro" \
           -e GITHUB_TOKEN -e GITHUB_API_URL -e GITHUB_GRAPHQL_URL -e RB_NWO -e RB_PR_NUMBER -e RB_HEAD -e REVIEW_MODEL -e REVIEW_MODE -e MIN_SEVERITY -e MAX_COMMENTS \
+          -e FEEDBACK_RUN_ID -e FEEDBACK_RUN_ATTEMPT -e REVIEW_AUTHOR \
           -e FINDINGS_PATH=/work/out/details.json -e FIT_PATH=/work/out/fit.json -e DIFF_PATH=/work/pr/diff.patch \
-          rev-engine-prime:action /agent/action/post.ts
+          rev-engine-prime:action /agent/action/post.ts > "$publication"
+        echo "review-url=$(jq -r '.url // empty' "$publication")" >> "$GITHUB_OUTPUT"
 
     # The node runtime's post: the GitHub token and no model key. The findings are the details file
     # the review wrote, and the fit file and diff are the same ones the docker runtime reads.
     - name: Post the review (node)
+      id: post-node
       if: steps.ask.outputs.run == 'true' && inputs.runtime == 'node'
       shell: bash
       env:
@@ -299,7 +311,14 @@ runs:
         REVIEW_MODE: ${{ steps.ask.outputs.mode }}
         MIN_SEVERITY: ${{ inputs.min-severity }}
         MAX_COMMENTS: ${{ inputs.max-findings }}
+        FEEDBACK_RUN_ID: ${{ inputs.feedback == 'true' && github.run_id || '' }}
+        FEEDBACK_RUN_ATTEMPT: ${{ inputs.feedback == 'true' && github.run_attempt || '' }}
+        REVIEW_AUTHOR: ${{ inputs.review-author }}
         FINDINGS_PATH: ${{ runner.temp }}/rev-engine-prime/out/details.json
         FIT_PATH: ${{ runner.temp }}/rev-engine-prime/out/fit.json
         DIFF_PATH: ${{ runner.temp }}/rev-engine-prime/pr/diff.patch
-      run: /opt/rev-engine-node/bin/node "$GITHUB_ACTION_PATH/action/post.ts"
+      run: |
+        set -euo pipefail
+        publication="$RUNNER_TEMP/rev-engine-prime/publication.json"
+        /opt/rev-engine-node/bin/node "$GITHUB_ACTION_PATH/action/post.ts" > "$publication"
+        echo "review-url=$(jq -r '.url // empty' "$publication")" >> "$GITHUB_OUTPUT"
