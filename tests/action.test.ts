@@ -176,6 +176,18 @@ function stepNamed(name: string): string {
   return step;
 }
 
+// A plain YAML scalar cannot hold ": ", and GitHub then refuses to load the whole action. With no
+// YAML parser here, the one-line metadata fields of every action are checked for it instead.
+test("no action's plain one-line description, default or name holds a colon and a space", () => {
+  for (const file of ["action.yml", "feedback/action.yml"]) {
+    readFileSync(join(ROOT, file), "utf8").split("\n").forEach((line, index) => {
+      const field = /^\s*(?:-\s+)?(description|default|name):\s+(.*)$/.exec(line);
+      if (!field || /^["'|>]/.test(field[2]!)) return;
+      assert.ok(!/:\s/.test(field[2]!), `${file}:${index + 1} has ": " in a plain ${field[1]}; quote the value`);
+    });
+  }
+});
+
 test("action.yml checks out only the head commit", () => {
   const checkout = stepNamed("Check out the pull request");
   assert.match(checkout, /fetch-depth: 1\n/);

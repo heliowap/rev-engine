@@ -6,7 +6,7 @@ inputs:
     description: accept writes the receipt of an accepted request. sync brings the receipt of a review run up to date.
     required: true
   github-token:
-    description: Token that reads and writes the receipt. Use the default Actions token: a token of another account fails the receipt author check. The review's posting token is never used here.
+    description: "Token that reads and writes the receipt. Use the default Actions token: a token of another account fails the receipt author check. The review's posting token is never used here."
     default: ${{ github.token }}
   pr-number:
     description: accept only. Pull request to review, as the root action reads it.
