@@ -259,6 +259,34 @@ test("review-env runs an agent review with the agent model and the eight swarm s
   assert.ok(lines.includes("RB_ATTEMPT=1"));
 });
 
+test("review-env passes the swarm effort an agent review asks for", () => {
+  const result = reviewEnv({ ...SETTINGS, MODE: "agent", AGENT_MODEL: "vendor/agent-b", SWARM_EFFORT: "high" });
+
+  assert.equal(result.status, 0, result.stderr);
+  const lines = result.stdout.trimEnd().split("\n");
+  assert.ok(lines.includes("RB_CONFIG_SWARM_EFFORT=high"));
+  assert.ok(!lines.includes("RB_CONFIG_SWARM_EFFORT=none"));
+});
+
+test("review-env keeps the swarm effort at none when the agent review does not set one", () => {
+  for (const swarmEffort of [undefined, ""]) {
+    const vars: Record<string, string> = { ...SETTINGS, MODE: "agent", AGENT_MODEL: "vendor/agent-b" };
+    if (swarmEffort !== undefined) vars.SWARM_EFFORT = swarmEffort;
+    const result = reviewEnv(vars);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.trimEnd().split("\n").includes("RB_CONFIG_SWARM_EFFORT=none"), String(swarmEffort));
+  }
+});
+
+test("review-env refuses a swarm effort with a line break, and prints nothing", () => {
+  const result = reviewEnv({ ...SETTINGS, MODE: "agent", AGENT_MODEL: "vendor/agent-b", SWARM_EFFORT: "high\nRB_CONFIG_MODE=human" });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /::error::/);
+  assert.equal(result.stdout, "");
+});
+
 test("review-env refuses an empty model for the review it runs, and prints nothing", () => {
   const human = reviewEnv({ ...SETTINGS, MODE: "human", RB_CONFIG_MODEL: "" });
   assert.equal(human.status, 1, human.stderr);
@@ -315,6 +343,12 @@ test("action.yml marks the inputs that only human reviews use", () => {
   for (const name of ["second-look", "effort", "wrap-up"]) {
     assert.match(inputNamed(name), /Human reviews only\./, name);
   }
+});
+
+test("action.yml has a swarm-effort input that defaults to none, and the settings step passes it", () => {
+  assert.match(inputNamed("swarm-effort"), /^    default: none$/m);
+  assert.match(inputNamed("swarm-effort"), /Agent reviews only\./);
+  assert.match(stepNamed("Write the review settings"), /^        SWARM_EFFORT: \$\{\{ inputs\.swarm-effort \}\}$/m);
 });
 
 test("the review settings step holds no secret", () => {

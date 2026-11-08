@@ -20,6 +20,9 @@ inputs:
   agent-model:
     description: OpenRouter model the swarm of an agent review uses.
     default: deepseek/deepseek-v4.1-flash-1017
+  swarm-effort:
+    description: Agent reviews only. Reasoning effort for the swarm's agents, for models that accept one.
+    default: none
   model:
     description: OpenRouter model that reviews and verifies.
     default: anthropic/claude-opus-5.5
@@ -190,6 +193,7 @@ runs:
         RB_CONFIG_WRAP_UP: ${{ inputs.wrap-up }}
         MODE: ${{ steps.ask.outputs.mode }}
         AGENT_MODEL: ${{ inputs.agent-model }}
+        SWARM_EFFORT: ${{ inputs.swarm-effort }}
       run: bash "$GITHUB_ACTION_PATH/action/review-env.sh" > "$RUNNER_TEMP/rev-engine-prime/review.env"
 
     - name: Build the reviewer
