@@ -799,16 +799,32 @@ test("sync refuses a receipt whose recorded review author differs from the confi
   }
 });
 
-test("sync rejects a source run that is not the expected review workflow or a comment or dispatch event", async () => {
+test("sync rejects a source run that is not the expected review workflow or a review request event", async () => {
   const fake = await startFake();
   try {
     seedReceipt(fake, { login: BOT, state: "started" });
     const api = new GitHubApi(fake.url, `token-${BOT}`);
     runIs(fake, "in_progress", null, 1, ".github/workflows/other.yml");
     await assert.rejects(sync(syncConfig(), api));
-    runIs(fake, "in_progress", null, 1, ".github/workflows/review.yml", "pull_request");
-    await assert.rejects(sync(syncConfig(), api));
+    for (const event of ["push", "pull_request_target", "schedule"]) {
+      runIs(fake, "in_progress", null, 1, ".github/workflows/review.yml", event);
+      await assert.rejects(sync(syncConfig(), api), event);
+    }
     assert.equal(patchesOf(fake).length, 0);
+  } finally {
+    await fake.close();
+  }
+});
+
+test("sync accepts a review run started by a pull request event, as a workflow that reviews on open does", async () => {
+  const fake = await startFake();
+  try {
+    seedReceipt(fake, { login: BOT, state: "accepted" });
+    const api = new GitHubApi(fake.url, `token-${BOT}`);
+    runIs(fake, "completed", "success", 1, ".github/workflows/review.yml", "pull_request");
+    const result = await sync(syncConfig(), api);
+    assert.equal(result.state, "failed");
+    assert.equal(patchesOf(fake).length, 1);
   } finally {
     await fake.close();
   }

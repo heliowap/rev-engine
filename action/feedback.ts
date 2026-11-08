@@ -279,7 +279,8 @@ interface Job {
   conclusion: string | null;
 }
 
-const SYNC_EVENTS = ["issue_comment", "workflow_dispatch"];
+// The events that start a review request: a comment, a manual run, and a pull request opened or marked ready.
+const SYNC_EVENTS = ["issue_comment", "workflow_dispatch", "pull_request"];
 const RECONCILE_ROUNDS = 3;
 
 /** The attempt of a run. A run without a positive safe attempt cannot be reconciled. */
