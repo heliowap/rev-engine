@@ -261,7 +261,7 @@ test("review-env leaves out the empty settings, so the reviewer keeps its defaul
 });
 
 test("review-env runs an agent review with the agent model and the eight swarm settings", () => {
-  const result = reviewEnv({ ...SETTINGS, MODE: "agent", AGENT_MODEL: "vendor/agent-b" });
+  const result = reviewEnv({ ...SETTINGS, MODE: "agent", AGENT_MODEL: "vendor/agent-b", SWARM_PROVIDERS: "together" });
 
   assert.equal(result.status, 0, result.stderr);
   const lines = result.stdout.trimEnd().split("\n");
@@ -293,6 +293,41 @@ test("review-env keeps the swarm effort at none when the agent review does not s
 
 test("review-env refuses a swarm effort with a line break, and prints nothing", () => {
   const result = reviewEnv({ ...SETTINGS, MODE: "agent", AGENT_MODEL: "vendor/agent-b", SWARM_EFFORT: "high\nRB_CONFIG_MODE=human" });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /::error::/);
+  assert.equal(result.stdout, "");
+});
+
+test("review-env passes the swarm providers an agent review names, and no others", () => {
+  const result = reviewEnv({ ...SETTINGS, MODE: "agent", AGENT_MODEL: "vendor/agent-b", SWARM_PROVIDERS: "anthropic,google-vertex" });
+
+  assert.equal(result.status, 0, result.stderr);
+  const lines = result.stdout.trimEnd().split("\n");
+  assert.ok(lines.includes("RB_CONFIG_SWARM_PROVIDERS=anthropic,google-vertex"));
+  assert.ok(!lines.includes("RB_CONFIG_SWARM_PROVIDERS=together"));
+});
+
+test("review-env leaves out the swarm providers when the agent review names none, so the swarm may use any provider", () => {
+  for (const swarmProviders of [undefined, ""]) {
+    const vars: Record<string, string> = { ...SETTINGS, MODE: "agent", AGENT_MODEL: "vendor/agent-b" };
+    if (swarmProviders !== undefined) vars.SWARM_PROVIDERS = swarmProviders;
+    const result = reviewEnv(vars);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(!result.stdout.split("\n").some((line) => line.startsWith("RB_CONFIG_SWARM_PROVIDERS=")), String(swarmProviders));
+  }
+});
+
+test("review-env prints no swarm providers line for a human review", () => {
+  const result = reviewEnv({ ...SETTINGS, MODE: "human", SWARM_PROVIDERS: "together" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(!result.stdout.includes("RB_CONFIG_SWARM_PROVIDERS"));
+});
+
+test("review-env refuses a swarm providers value with a line break, and prints nothing", () => {
+  const result = reviewEnv({ ...SETTINGS, MODE: "agent", AGENT_MODEL: "vendor/agent-b", SWARM_PROVIDERS: "together\nRB_CONFIG_MODE=human" });
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /::error::/);
@@ -361,6 +396,13 @@ test("action.yml has a swarm-effort input that defaults to none, and the setting
   assert.match(inputNamed("swarm-effort"), /^    default: none$/m);
   assert.match(inputNamed("swarm-effort"), /Agent reviews only\./);
   assert.match(stepNamed("Write the review settings"), /^        SWARM_EFFORT: \$\{\{ inputs\.swarm-effort \}\}$/m);
+});
+
+test("action.yml has a swarm-providers input that defaults to together, and the settings step passes it", () => {
+  assert.match(inputNamed("swarm-providers"), /^    default: together$/m);
+  assert.match(inputNamed("swarm-providers"), /Agent reviews only\./);
+  assert.match(inputNamed("swarm-providers"), /Empty lets OpenRouter pick any provider, except for an agent model with providers built into the swarm/);
+  assert.match(stepNamed("Write the review settings"), /^        SWARM_PROVIDERS: \$\{\{ inputs\.swarm-providers \}\}$/m);
 });
 
 test("the review settings step holds no secret", () => {
@@ -435,7 +477,7 @@ test("entry.sh accepts every settings line review-env.sh prints, for a human and
   const entry = patchedEntry(root);
 
   for (const mode of ["human", "agent"]) {
-    const settings = reviewEnv({ ...SETTINGS, MODE: mode, AGENT_MODEL: "vendor/agent-b" });
+    const settings = reviewEnv({ ...SETTINGS, MODE: mode, AGENT_MODEL: "vendor/agent-b", SWARM_PROVIDERS: "together" });
     assert.equal(settings.status, 0, settings.stderr);
     const dir = makeJob(join(root, "jobs"), `${mode}job`);
     writeFileSync(join(dir, "env"), settings.stdout);

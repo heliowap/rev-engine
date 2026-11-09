@@ -23,6 +23,9 @@ inputs:
   swarm-effort:
     description: Agent reviews only. Reasoning effort for the swarm's agents, for models that accept one.
     default: none
+  swarm-providers:
+    description: Agent reviews only. Comma-separated OpenRouter providers allowed to serve the swarm's calls, such as together. Empty lets OpenRouter pick any provider, except for an agent model with providers built into the swarm, such as the default agent-model, which keeps together.
+    default: together
   model:
     description: OpenRouter model that reviews and verifies.
     default: anthropic/claude-opus-5.5
@@ -197,6 +200,7 @@ runs:
         MODE: ${{ steps.ask.outputs.mode }}
         AGENT_MODEL: ${{ inputs.agent-model }}
         SWARM_EFFORT: ${{ inputs.swarm-effort }}
+        SWARM_PROVIDERS: ${{ inputs.swarm-providers }}
       run: bash "$GITHUB_ACTION_PATH/action/review-env.sh" > "$RUNNER_TEMP/rev-engine-prime/review.env"
 
     - name: Build the reviewer

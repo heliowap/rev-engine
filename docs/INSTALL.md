@@ -57,7 +57,7 @@ The result is one comment with no comments on lines:
 - Each finding's severity, how many verifiers confirmed it, its location and the full explanation.
 - The same one line of merge advice as a human review.
 
-An agent can read the whole list and decide what to fix. There is no assessment of whether the change belongs in the project. The `model`, `min-severity`, `max-findings`, `fit`, `effort`, `second-look` and `wrap-up` inputs do not apply to an agent review. Its counterparts are `agent-model`, which picks the swarm's model, and `swarm-effort`, which sets the reasoning effort of the swarm's agents. `time-budget` only caps the swarm's own pace of 60 seconds per agent, 90 at most.
+An agent can read the whole list and decide what to fix. There is no assessment of whether the change belongs in the project. The `model`, `min-severity`, `max-findings`, `fit`, `effort`, `second-look` and `wrap-up` inputs do not apply to an agent review. Its counterparts are `agent-model`, which picks the swarm's model, `swarm-effort`, which sets the reasoning effort of the swarm's agents, and `swarm-providers`, which names the OpenRouter providers allowed to serve the swarm's calls. `time-budget` only caps the swarm's own pace of 60 seconds per agent, 90 at most.
 
 `/review human`, or `/review` alone, runs the default review.
 
@@ -75,6 +75,7 @@ An agent can read the whole list and decide what to fix. There is no assessment 
 | `mode` | `human` | The review to run when the comment names none, or when the workflow is started by hand. |
 | `agent-model` | `deepseek/deepseek-v4.1-flash-1017` | OpenRouter model the swarm of an agent review uses. |
 | `swarm-effort` | `none` | Agent reviews only. Reasoning effort for the swarm's agents, for models that accept one: `none`, `minimal`, `low`, `medium` or `high`. |
+| `swarm-providers` | `together` | Agent reviews only. Comma-separated OpenRouter providers allowed to serve the swarm's calls, such as `together`. Empty lets OpenRouter pick any provider, except for an agent model with providers built into the swarm, such as the default `agent-model`, which keeps `together`. |
 | `allow-forks` | `false` | Set to `true` to review pull requests from forks. |
 | `max-turns` | empty | Model turns allowed per review or verification pass. Empty keeps the reviewer's default (see [SETTINGS.md](SETTINGS.md)). |
 | `second-look` | empty | Human reviews only. What a reviewer does after its first submission: `on`, `sweep`, `sweep-low`, `small` or `off`. Empty keeps the reviewer's default (see [SETTINGS.md](SETTINGS.md)). |
